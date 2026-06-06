@@ -1,0 +1,31 @@
+/* dinamic media popup stylesheet */
+
+/* panel indicator */
+.dinamic-indicator {
+    padding: 0 6px;
+}
+
+/* popup widget used via addChrome() */
+.dinamic-popup {
+    background: rgba(5, 5, 7, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 44px;
+    box-shadow: 0 22px 56px rgba(0, 0, 0, 0.66);
+}
+
+/* hover effect on control buttons */
+.dinamic-popup .dinamic-secondary-button:hover {
+    background-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+.dinamic-popup .dinamic-secondary-button:active {
+    background-color: rgba(52, 211, 153, 0.24) !important;
+}
+
+.dinamic-popup .dinamic-primary-button:hover {
+    background-color: rgba(255, 255, 255, 0.92) !important;
+}
+
+.dinamic-popup .dinamic-primary-button:active {
+    background-color: rgba(52, 211, 153, 0.92) !important;
+}
