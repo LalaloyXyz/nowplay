@@ -23,7 +23,7 @@ Compatible with **Spotify** and any other **MPRIS-compatible** media player (Rhy
 ## Requirements
 
 - GNOME Shell 46, 47, 48, 49, or 50
-- An MPRIS-compatible media player (e.g., Spotify, Rhythmbox, VLC)
+- An MPRIS-compatible media player
 
 ## Installation
 
@@ -56,16 +56,6 @@ Once enabled, hover your mouse over the clock in the top panel (or click it) to 
 
 Move your cursor away and the popup auto-closes after a short delay. Hover back over it to keep it open.
 
-## Preferences
-
-Open the extension's preferences from GNOME Extensions app or Settings → Extensions → Now Play. The preferences page includes links to support the developer and the extension repository.
-
 ## Support
 
-If you enjoy this extension, consider supporting its development:
-
 - [Ko-fi](https://ko-fi.com/pleumlookchill)
-
-## License
-
-MIT
