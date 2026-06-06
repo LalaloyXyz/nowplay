@@ -2,6 +2,7 @@
   "name": "Now Play",
   "description": "Popup media player widget with controls for Spotify and other MPRIS players",
   "uuid": "nowplay@LalaloyXyz",
+  "settings-schema": "org.gnome.shell.extensions.nowplay",
   "shell-version": ["46", "47", "48", "49", "50"],
   "version": 1,
   "url": "https://github.com/LalaloyXyz/nowplay"
