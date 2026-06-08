@@ -13,6 +13,13 @@
     box-shadow: 0 22px 56px rgba(0, 0, 0, 0.66);
 }
 
+/* control buttons — smooth hover transitions */
+.dinamic-popup .dinamic-control-button {
+    transition-duration: 150ms;
+    transition-timing-function: ease-out;
+    transition-property: background-color, border-color;
+}
+
 /* hover effect on control buttons */
 .dinamic-popup .dinamic-secondary-button:hover {
     background-color: rgba(255, 255, 255, 0.18) !important;

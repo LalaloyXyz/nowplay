@@ -4,11 +4,14 @@ import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 
+import { debugLog } from './debug.js';
+
 const CONFIG = {
     width: 520,
     height: 176,
     topMargin: 10,
-    animDuration: 220,
+    animDuration: 480,
+    animCloseDuration: 340,
     autoCloseDelay: 3600,
     popupLeaveCloseDelay: 500,
 };
@@ -17,7 +20,7 @@ const THEME = {
     background: 'rgba(5, 5, 7, 0.98)',
     border: 'rgba(255, 255, 255, 0.11)',
     highlight: 'rgba(255, 255, 255, 0.16)',
-    progress: '#34d399',
+    progress: '#ffffff',
     accentSoft: 'rgba(52, 211, 153, 0.18)',
     text: '#ffffff',
     mutedText: '#c7c7cc',
@@ -28,23 +31,21 @@ const THEME = {
 };
 
 export class DinamicUi {
-    constructor({ uuid, name, onOpenPopup, onControl }) {
+    constructor({ uuid, name, onOpenPopup, onControl, onSeek }) {
         this._uuid = uuid;
         this._name = name;
         this._onOpenPopup = onOpenPopup;
         this._onControl = onControl;
+        this._onSeek = onSeek || (() => {});
         this._clockButton = null;
-        this._enterSignal = null;
-        this._pressSignal = null;
-        this._touchSignal = null;
+        this._clockButtonHandler = null;
         this._popup = null;
-        this._popupKeyPressId = null;
-        this._popupEnterSignal = null;
-        this._popupLeaveSignal = null;
+        this._popupHandler = null;
         this._closeTimer = 0;
         this._popupVisible = false;
         this._progressOuter = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
     }
@@ -58,50 +59,41 @@ export class DinamicUi {
             || Main.panel.statusArea.dateMenu;
 
         if (!this._clockButton) {
-            log('[dinamic] clock button not found');
+            debugLog('clock button not found');
             return;
         }
 
-        this._enterSignal = this._clockButton.connect('enter-event', () => {
-            this._onOpenPopup();
-            return Clutter.EVENT_PROPAGATE;
-        });
-
-        this._pressSignal = this._clockButton.connect('button-press-event', (_actor, event) => {
-            if (event.get_button() !== 1)
+        this._clockButtonHandler = this._clockButton.connectObject(
+            'enter-event', () => {
+                this._onOpenPopup();
                 return Clutter.EVENT_PROPAGATE;
+            },
+            'button-press-event', (_actor, event) => {
+                if (event.get_button() !== 1)
+                    return Clutter.EVENT_PROPAGATE;
 
-            this._onOpenPopup();
-            return Clutter.EVENT_STOP;
-        });
+                this._onOpenPopup();
+                return Clutter.EVENT_STOP;
+            },
+            'touch-event', (_actor, event) => {
+                if (event.type() !== Clutter.EventType.TOUCH_BEGIN)
+                    return Clutter.EVENT_PROPAGATE;
 
-        this._touchSignal = this._clockButton.connect('touch-event', (_actor, event) => {
-            if (event.type() !== Clutter.EventType.TOUCH_BEGIN)
-                return Clutter.EVENT_PROPAGATE;
-
-            this._onOpenPopup();
-            return Clutter.EVENT_STOP;
-        });
+                this._onOpenPopup();
+                return Clutter.EVENT_STOP;
+            }
+        );
     }
 
     disable() {
         this.destroyPopup();
 
-        if (this._clockButton) {
-            if (this._enterSignal)
-                this._clockButton.disconnect(this._enterSignal);
-
-            if (this._pressSignal)
-                this._clockButton.disconnect(this._pressSignal);
-
-            if (this._touchSignal)
-                this._clockButton.disconnect(this._touchSignal);
+        if (this._clockButton && this._clockButtonHandler) {
+            this._clockButton.disconnectObject(this._clockButtonHandler);
+            this._clockButtonHandler = null;
         }
 
         this._clockButton = null;
-        this._enterSignal = null;
-        this._pressSignal = null;
-        this._touchSignal = null;
     }
 
     updateIndicator(player) {
@@ -133,36 +125,46 @@ export class DinamicUi {
         this.buildPopupContent(player);
         Main.layoutManager.addChrome(this._popup, { trackFullscreen: true });
 
-        this._popupKeyPressId = this._popup.connect('key-press-event', (_actor, event) => {
-            if (event.get_key_symbol() === Clutter.KEY_Escape) {
-                this.destroyPopup();
-                return Clutter.EVENT_STOP;
+        this._popupHandler = this._popup.connectObject(
+            'key-press-event', (_actor, event) => {
+                if (event.get_key_symbol() === Clutter.KEY_Escape) {
+                    this.destroyPopup();
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            },
+            'enter-event', () => {
+                this._clearCloseTimer();
+                return Clutter.EVENT_PROPAGATE;
+            },
+            'leave-event', () => {
+                this._scheduleClose(CONFIG.popupLeaveCloseDelay);
+                return Clutter.EVENT_PROPAGATE;
             }
-            return Clutter.EVENT_PROPAGATE;
-        });
-        this._popupEnterSignal = this._popup.connect('enter-event', () => {
-            this._clearCloseTimer();
-            return Clutter.EVENT_PROPAGATE;
-        });
-        this._popupLeaveSignal = this._popup.connect('leave-event', () => {
-            this._scheduleClose(CONFIG.popupLeaveCloseDelay);
-            return Clutter.EVENT_PROPAGATE;
-        });
+        );
         this._popup.grab_key_focus();
 
         const [x, y] = this._getPopupPosition();
         if (CONFIG.animDuration > 0) {
+            // Start as a pill: narrow + compressed, centred on target position
             this._popup.opacity = 0;
-            this._popup.set_scale(0.96, 0.96);
             this._popup.set_pivot_point(0.5, 0.5);
+            this._popup.set_scale(0.32, 0.52);
             this._popup.set_position(x, y);
+
+            // Fade in quickly
             this._popup.ease({
-                y,
                 opacity: 255,
+                duration: 120,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+
+            // Single-overshoot spring — pops open and settles, no shake
+            this._popup.ease({
                 scale_x: 1,
                 scale_y: 1,
                 duration: CONFIG.animDuration,
-                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                mode: Clutter.AnimationMode.EASE_OUT_BACK,
             });
         } else {
             this._popup.set_position(x, y);
@@ -178,29 +180,23 @@ export class DinamicUi {
 
         this._clearCloseTimer();
 
-        if (this._popupKeyPressId) {
-            this._popup.disconnect(this._popupKeyPressId);
-            this._popupKeyPressId = null;
+        if (this._popupHandler) {
+            this._popup.disconnectObject(this._popupHandler);
+            this._popupHandler = null;
         }
 
-        if (this._popupEnterSignal) {
-            this._popup.disconnect(this._popupEnterSignal);
-            this._popupEnterSignal = null;
-        }
-
-        if (this._popupLeaveSignal) {
-            this._popup.disconnect(this._popupLeaveSignal);
-            this._popupLeaveSignal = null;
-        }
-
-        if (CONFIG.animDuration > 0) {
-            const [, y] = this._popup.get_position();
+        if (CONFIG.animCloseDuration > 0) {
+            // Squeeze back into a pill then vanish — reverse of the open spring
             this._popup.ease({
-                y: y + 18,
+                scale_x: 0.38,
+                scale_y: 0.48,
+                duration: CONFIG.animCloseDuration,
+                mode: Clutter.AnimationMode.EASE_IN_BACK,
+            });
+            this._popup.ease({
                 opacity: 0,
-                scale_x: 0.96,
-                scale_y: 0.96,
-                duration: CONFIG.animDuration,
+                duration: Math.round(CONFIG.animCloseDuration * 0.6),
+                delay: Math.round(CONFIG.animCloseDuration * 0.4),
                 mode: Clutter.AnimationMode.EASE_IN_QUAD,
                 onComplete: () => this._removePopup(),
             });
@@ -236,8 +232,10 @@ export class DinamicUi {
 
         this._progressOuter = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
+        this._draggingProgress = false;
         this._popup.style = this._getPopupStyle();
 
         const mainBox = new St.BoxLayout({
@@ -259,18 +257,43 @@ export class DinamicUi {
         if (this._progressFill && player?.trackLen > 0) {
             const frac = Math.min(1, safePosition / player.trackLen);
             const width = this._progressOuter?.get_width?.() || 0;
-            if (width > 0)
-                this._progressFill.set_width(Math.round(width * frac));
+            if (width > 0) {
+                const targetWidth = Math.round(width * frac);
+                if (this._draggingProgress) {
+                    // Instant snap during drag — no easing fighting the mouse
+                    this._progressFill.remove_all_transitions();
+                    this._progressFill.set_width(targetWidth);
+                } else {
+                    // Smooth glide for playback tick updates
+                    this._progressFill.ease({
+                        width: targetWidth,
+                        duration: 900,
+                        mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+                    });
+                }
+            }
         }
 
-        if (this._currentTimeLabel)
-            this._currentTimeLabel.text = this._formatTime(safePosition);
+        if (this._currentTimeLabel) {
+            const formatted = this._formatTime(safePosition);
+            if (this._currentTimeLabel.text !== formatted)
+                this._currentTimeLabel.text = formatted;
+        }
 
         if (this._playPauseIcon && player) {
             this._playPauseIcon.icon_name = player.status === 'Playing'
                 ? 'media-playback-pause-symbolic'
                 : 'media-playback-start-symbolic';
         }
+    }
+
+    _updateThumbPosition(fillWidth) {
+        if (!this._progressThumb || !this._progressOuter) return;
+
+        const thumbX = fillWidth - 7;
+        const barHeight = this._progressOuter.get_height() || 6;
+        const thumbY = Math.max(0, (barHeight - 14) / 2);
+        this._progressThumb.set_position(Math.max(0, thumbX), thumbY);
     }
 
     _removePopup() {
@@ -281,6 +304,7 @@ export class DinamicUi {
         this._popup = null;
         this._progressOuter = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
     }
@@ -329,6 +353,8 @@ export class DinamicUi {
         const progOuter = new St.BoxLayout({
             style: 'background-color: rgba(255,255,255,0.13); height: 6px; border-radius: 99px; margin-top: 8px;',
             x_expand: true,
+            reactive: true,
+            track_hover: true,
         });
         this._progressOuter = progOuter;
         this._progressFill = new St.BoxLayout({
@@ -336,7 +362,70 @@ export class DinamicUi {
             width: 0,
         });
         progOuter.add_child(this._progressFill);
+
+        this._progressThumb = new St.Widget({
+            style: `
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                background-color: ${THEME.progress};
+                box-shadow: 0 0 10px rgba(52, 211, 153, 0.45);
+            `,
+            x_expand: false,
+            y_expand: false,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._progressThumb.hide();
+        progOuter.add_child(this._progressThumb);
+
         rightBox.add_child(progOuter);
+
+        let dragging = false;
+        let lastSeekCall = 0;
+
+        const seekFromEvent = (actor, event) => {
+            const [stageX] = event.get_coords();
+            const [actorX] = actor.get_transformed_position();
+            const width = actor.get_width();
+            if (width <= 0) return;
+            const frac = Math.max(0, Math.min(1, (stageX - actorX) / width));
+            const position = Math.round(frac * player.trackLen);
+
+            // Snap visual immediately — no throttle on layout updates
+            this.updateProgress(position, player);
+            this._updateThumbPosition(Math.round(frac * width));
+
+            // Throttle D-Bus SetPosition to ~10/sec during drag
+            const now = GLib.get_monotonic_time();
+            if (now - lastSeekCall >= 100000) {
+                this._onSeek(position);
+                lastSeekCall = now;
+            }
+        };
+
+        progOuter.connect('button-press-event', (actor, event) => {
+            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+            dragging = true;
+            this._draggingProgress = true;
+            this._progressThumb?.show();
+            seekFromEvent(actor, event);
+            return Clutter.EVENT_STOP;
+        });
+
+        progOuter.connect('motion-event', (actor, event) => {
+            if (!dragging) return Clutter.EVENT_PROPAGATE;
+            seekFromEvent(actor, event);
+            return Clutter.EVENT_STOP;
+        });
+
+        progOuter.connect('button-release-event', (actor, event) => {
+            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
+            dragging = false;
+            this._draggingProgress = false;
+            this._progressThumb?.hide();
+            seekFromEvent(actor, event);
+            return Clutter.EVENT_STOP;
+        });
 
         const trackTime = player.trackLen ? this._formatTime(player.trackLen) : '0:00';
         const timeRow = new St.BoxLayout({
@@ -419,7 +508,7 @@ export class DinamicUi {
                 padding: 4px 8px;
                 border-radius: 99px;
                 background-color: ${isPlaying ? THEME.accentSoft : 'rgba(255,255,255,0.08)'};
-                border: 1px solid ${isPlaying ? 'rgba(52, 211, 153, 0.28)' : THEME.buttonBorder};
+                border: 1px solid ${isPlaying ? 'rgba(255, 255, 255, 0.55)' : THEME.buttonBorder};
             `,
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -452,6 +541,16 @@ export class DinamicUi {
             can_focus: true,
             track_hover: true,
         });
+        playPauseButton.set_pivot_point(0.5, 0.5);
+        playPauseButton.connect('button-press-event', () => {
+            playPauseButton.ease({ scale_x: 0.78, scale_y: 0.78, duration: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            return Clutter.EVENT_PROPAGATE;
+        });
+        playPauseButton.connect('button-release-event', () => {
+            playPauseButton.ease({ scale_x: 1.10, scale_y: 1.10, duration: 100, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            playPauseButton.ease({ scale_x: 1, scale_y: 1, duration: 220, delay: 100, mode: Clutter.AnimationMode.EASE_OUT_BACK });
+            return Clutter.EVENT_PROPAGATE;
+        });
         playPauseButton.connect('clicked', () => this._onControl('PlayPause'));
         controls.add_child(playPauseButton);
 
@@ -472,6 +571,16 @@ export class DinamicUi {
             reactive: true,
             can_focus: true,
             track_hover: true,
+        });
+        button.set_pivot_point(0.5, 0.5);
+        button.connect('button-press-event', () => {
+            button.ease({ scale_x: 0.80, scale_y: 0.80, duration: 90, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            return Clutter.EVENT_PROPAGATE;
+        });
+        button.connect('button-release-event', () => {
+            button.ease({ scale_x: 1.10, scale_y: 1.10, duration: 100, mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+            button.ease({ scale_x: 1, scale_y: 1, duration: 220, delay: 100, mode: Clutter.AnimationMode.EASE_OUT_BACK });
+            return Clutter.EVENT_PROPAGATE;
         });
         button.connect('clicked', callback);
         return button;

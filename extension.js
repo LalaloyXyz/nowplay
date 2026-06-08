@@ -3,6 +3,7 @@ import GLib from 'gi://GLib';
 
 import { MprisDataFetcher } from './datafetch.js';
 import { DinamicUi } from './ui.js';
+import { initDebug, debugLog } from './debug.js';
 
 export default class DinamicMediaPopup extends Extension {
     constructor(metadata) {
@@ -13,24 +14,26 @@ export default class DinamicMediaPopup extends Extension {
     }
 
     enable() {
-        log('[dinamic] enabling');
+        initDebug();
+        debugLog('enabling');
 
         this._ui = new DinamicUi({
             uuid: this.uuid,
             name: this.metadata.name,
             onOpenPopup: () => this._openPopup(),
             onControl: method => this._data?.sendControl(method),
+            onSeek: position => this._data?.setPosition(position),
         });
         this._ui.enable();
 
         this._data = new MprisDataFetcher(player => this._syncPlayer(player));
         this._data.enable();
 
-        log('[dinamic] enabled');
+        debugLog('enabled');
     }
 
     disable() {
-        log('[dinamic] disabling');
+        debugLog('disabling');
 
         this._stopPositionPolling();
 
@@ -44,7 +47,7 @@ export default class DinamicMediaPopup extends Extension {
             this._ui = null;
         }
 
-        log('[dinamic] disabled');
+        debugLog('disabled');
     }
 
     _syncPlayer(player) {

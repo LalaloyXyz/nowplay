@@ -1,6 +1,8 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 
+import { debugLog } from './debug.js';
+
 export class MprisDataFetcher {
     constructor(onPlayersChanged = () => {}) {
         this._onPlayersChanged = onPlayersChanged;
@@ -52,6 +54,26 @@ export class MprisDataFetcher {
         );
     }
 
+    setPosition(microseconds) {
+        if (!this._activePlayer) return;
+
+        const player = this._players[this._activePlayer];
+        if (!player || !player.trackId || player.trackLen <= 0) return;
+
+        Gio.DBus.session.call(
+            this._activePlayer,
+            '/org/mpris/MediaPlayer2',
+            'org.mpris.MediaPlayer2.Player',
+            'SetPosition',
+            GLib.Variant.new('(ox)', [player.trackId, microseconds]),
+            null,
+            Gio.DBusCallFlags.NONE,
+            -1,
+            null,
+            () => {}
+        );
+    }
+
     async refreshActiveProgress() {
         if (!this._activePlayer)
             return null;
@@ -87,7 +109,7 @@ export class MprisDataFetcher {
                     this._onPlayerAppeared(name);
             }
         } catch (e) {
-            log(`[dinamic] scan error: ${e}`);
+            debugLog(`scan error: ${e}`);
         }
     }
 
@@ -124,6 +146,7 @@ export class MprisDataFetcher {
             title: '',
             artist: '',
             artUrl: null,
+            trackId: null,
             trackLen: 0,
             position: 0,
             positionUpdatedAt: 0,
@@ -184,6 +207,7 @@ export class MprisDataFetcher {
                 player.title = title;
                 player.artist = artist;
                 player.artUrl = this._unpackValue(metadata['mpris:artUrl']) || null;
+                player.trackId = this._unpackValue(metadata['mpris:trackid']) || null;
                 player.trackLen = this._unpackValue(metadata['mpris:length']) || 0;
                 this._setPlayerPosition(player, this._readPosition(props, player.position));
             }
