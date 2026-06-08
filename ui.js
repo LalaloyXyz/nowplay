@@ -48,6 +48,8 @@ export class DinamicUi {
         this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
+        this._eqTimers = [];
+        this._eqActive = false;
     }
 
     get popupVisible() {
@@ -179,6 +181,7 @@ export class DinamicUi {
         if (!this._popup) return;
 
         this._clearCloseTimer();
+        this._clearEqAnimation();
 
         if (this._popupHandler) {
             this._popup.disconnectObject(this._popupHandler);
@@ -222,6 +225,12 @@ export class DinamicUi {
 
         GLib.source_remove(this._closeTimer);
         this._closeTimer = 0;
+    }
+
+    _clearEqAnimation() {
+        this._eqActive = false;
+        this._eqTimers.forEach(id => GLib.source_remove(id));
+        this._eqTimers = [];
     }
 
     buildPopupContent(player) {
@@ -299,6 +308,8 @@ export class DinamicUi {
     _removePopup() {
         if (!this._popup) return;
 
+        this._clearEqAnimation();
+
         Main.layoutManager.removeChrome(this._popup);
         this._popup.destroy();
         this._popup = null;
@@ -321,7 +332,7 @@ export class DinamicUi {
     _createDetails(player) {
         const rightBox = new St.BoxLayout({
             vertical: true,
-            style: 'spacing: 7px; min-width: 80px; padding-top: 3px;',
+            style: 'spacing: 7px; min-width: 80px;',
             x_expand: true,
             y_expand: true,
         });
@@ -489,38 +500,77 @@ export class DinamicUi {
 
     _createStatusPill(player) {
         const isPlaying = player.status === 'Playing';
-        const icon = new St.Icon({
-            icon_name: isPlaying
-                ? 'media-playback-start-symbolic'
-                : 'media-playback-pause-symbolic',
-            style: 'width: 11px; height: 11px;',
-            icon_size: 11,
-        });
-        const label = new St.Label({
-            text: isPlaying ? 'Live' : 'Paused',
-            style: `font-size: 10px; font-weight: 700; color: ${THEME.text};`,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
-        const pill = new St.BoxLayout({
-            vertical: false,
-            style: `
-                spacing: 5px;
-                padding: 4px 8px;
-                border-radius: 99px;
-                background-color: ${isPlaying ? THEME.accentSoft : 'rgba(255,255,255,0.08)'};
-                border: 1px solid ${isPlaying ? 'rgba(255, 255, 255, 0.55)' : THEME.buttonBorder};
-            `,
-            y_align: Clutter.ActorAlign.CENTER,
-        });
 
-        pill.add_child(icon);
-        pill.add_child(label);
-        return pill;
+        // Equalizer bars
+        const barBox = new St.BoxLayout({
+            vertical: false,
+            style: 'spacing: 2px;',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const NUM_BARS = 4;
+        const bars = [];
+        const barBaseHeights = [4, 0, 6, 2];
+        const barHeights = [1.8, 1.3, 2.2, 1.5];
+        const barSpeeds = [420, 360, 500, 440];
+
+        for (let i = 0; i < NUM_BARS; i++) {
+            const bar = new St.Widget({
+                style: `
+                    width: 3px;
+                    min-height: 6px;
+                    height: ${barBaseHeights[i]}px;
+                    background-color: ${THEME.text};
+                    border-radius: 2px;
+                `,
+            });
+            bar.set_pivot_point(0.5, 1.0);
+            bars.push(bar);
+            barBox.add_child(bar);
+        }
+
+        // Equalizer up-down animation when playing
+        if (isPlaying) {
+            this._eqActive = true;
+            bars.forEach((bar, i) => {
+                const bob = () => {
+                    if (!this._eqActive || !bar.get_parent()) return;
+                    bar.ease({
+                        scale_y: barHeights[i],
+                        duration: barSpeeds[i],
+                        mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                        onComplete: () => {
+                            bob();
+                        },
+                    });
+                };
+                // First half: rise up
+                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 100, () => {
+                    bar.ease({
+                        scale_y: barHeights[i],
+                        duration: barSpeeds[i],
+                        mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                        onComplete: () => {
+                            // Fall back and loop
+                            bar.ease({
+                                scale_y: 1.0,
+                                duration: barSpeeds[i],
+                                mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                            });
+                            bob();
+                        },
+                    });
+                    return GLib.SOURCE_REMOVE;
+                });
+                this._eqTimers.push(id);
+            });
+        }
+
+        return barBox;
     }
 
     _createControls(player) {
         const controls = new St.BoxLayout({
-            style: 'spacing: 14px; padding-top: 6px;',
+            style: 'spacing: 6px; padding-top: 6px;',
             x_align: Clutter.ActorAlign.CENTER,
         });
 
@@ -530,8 +580,8 @@ export class DinamicUi {
             icon_name: player.status === 'Playing'
                 ? 'media-playback-pause-symbolic'
                 : 'media-playback-start-symbolic',
-            style: 'width: 20px; height: 20px; color: #050507;',
-            icon_size: 20,
+            style: 'width: 40px; height: 40px;',
+            icon_size: 40,
         });
         const playPauseButton = new St.Button({
             style_class: 'dinamic-control-button dinamic-primary-button',
@@ -561,8 +611,8 @@ export class DinamicUi {
     _makeButton(iconName, callback) {
         const icon = new St.Icon({
             icon_name: iconName,
-            style: 'width: 16px; height: 16px;',
-            icon_size: 16,
+            style: 'width: 40px; height: 40px;',
+            icon_size: 40,
         });
         const button = new St.Button({
             style_class: 'dinamic-control-button dinamic-secondary-button',
@@ -612,17 +662,14 @@ export class DinamicUi {
     }
 
     _getButtonStyle(primary) {
-        const background = primary ? THEME.text : THEME.buttonBg;
-        const border = primary ? `1px solid ${THEME.highlight}` : `1px solid ${THEME.buttonBorder}`;
-        const color = primary ? '#050507' : THEME.text;
-        const size = primary ? 44 : 38;
+        const color = THEME.text;
+        const size = primary ? 28 : 22;
 
         return `
             padding: 0;
             color: ${color};
-            border-radius: 99px;
-            background-color: ${background};
-            border: ${border};
+            background-color: transparent;
+            border: none;
             min-width: ${size}px;
             min-height: ${size}px;
         `;
