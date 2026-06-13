@@ -1,61 +1,188 @@
-# Now Play
+<div align="center">
 
-A GNOME Shell extension that shows a sleek popup media player widget when you hover over or click the clock in the top panel.
+<img src="assets/icon.png" width="128" alt="Now Play">
 
-Compatible with **Spotify** and any other **MPRIS-compatible** media player (Rhythmbox, VLC, Firefox, etc.).
+# 🎵 Now Play
 
-![GNOME Shell version](https://img.shields.io/badge/Shell-46%20|%2047%20|%2048%20|%2049%20|%2050-blue)
+### A beautiful media controller for GNOME Shell that brings your music controls right to the clock menu.
 
-## Features
+<br>
 
-- **Hover or click the clock** to open the media popup
-- **Album art** — displays cover art in a rounded frame with drop shadow
-- **Track info** — song title and artist, ellipsized when too long
-- **Playback status pill** — "Live" (green) or "Paused" (grey) indicator
-- **Seek bar** — real-time progress bar that updates every second
-- **Time display** — current position / total duration
-- **Media controls** — Previous | Play/Pause | Next buttons
-- **Smooth animations** — popup fades in/out with a subtle scale effect
-- **Auto-close** — popup closes after inactivity; stays open while your cursor is on it
-- **Dark frosted glass design** — macOS-style dark theme with rounded corners
-- **Escape key** — dismiss the popup with the Escape key
+![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-46%20|%2047%20|%2048%20|%2049%20|%2050-4A86CF)
+![Platform](https://img.shields.io/badge/Platform-Linux-FCC624)
+![License](https://img.shields.io/badge/License-GPL--3.0-green)
 
-## Requirements
+<br>
 
-- GNOME Shell 46, 47, 48, 49, or 50
-- An MPRIS-compatible media player
+<a href="https://extensions.gnome.org/extension/10105/now-play/">
+  <img src="https://img.shields.io/badge/Download-GNOME%20Extensions-4A86CF?style=for-the-badge">
+</a>
 
-## Installation
+<a href="https://buymeacoffee.com/banditpetsw">
+  <img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=for-the-badge">
+</a>
 
-### From source
+<br><br>
+
+<img src="https://extensions.gnome.org/extension-data/screenshots/screenshot_10105_Lt1gJj3.gif" alt="Now Play Preview">
+
+</div>
+
+---
+
+## ✨ Overview
+
+**Now Play** is a lightweight and elegant GNOME Shell extension that gives you quick access to media controls directly from the top panel.
+
+Simply hover over or click the clock to open a beautiful popup displaying album artwork, track information, playback progress, and media controls.
+
+Designed to feel native to GNOME while staying clean, fast.
+
+---
+
+## 🎵 Features
+
+### 🎮 Playback Controls
+
+- Play / Pause
+- Previous Track
+- Next Track
+
+### 📀 Media Information
+
+- Album artwork display
+- Song title
+- Artist name
+- Media player application icon
+- Playback status indicator
+
+### 🖱 Easy Access
+
+- Hover over the clock to open
+- Click the clock to toggle
+- Automatically hides when inactive
+- Stays open while hovered
+- Close instantly with the Escape key
+
+---
+
+## 🎧 Supported Media Players
+
+Now Play works with any **MPRIS-compatible** media player.
+
+Examples include:
+
+- Spotify
+- VLC
+- Rhythmbox
+- Firefox
+- Chromium
+- MPV
+- Celluloid
+- Amberol
+
+And many more.
+
+---
+
+## 🔧 Requirements
+
+### Platform
+
+- Linux
+
+### GNOME Shell
+
+- 46
+- 47
+- 48
+- 49
+- 50
+
+### Media Player
+
+Any MPRIS-compatible media player.
+
+---
+
+## 📦 Installation
+
+### Install from GNOME Extensions
+
+Visit:
+
+https://extensions.gnome.org/extension/10105/now-play/
+
+or use the Download button above.
+
+### Manual Installation
 
 ```bash
 git clone https://github.com/LalaloyXyz/nowplay.git
 cd nowplay
-cp -r nowplay@LalaloyXyz ~/.local/share/gnome-shell/extensions/
+
+cp -r nowplay@LalaloyXyz \
+~/.local/share/gnome-shell/extensions/
 ```
 
-Then restart the shell (Alt+F2, type `r`, press Enter) or log out and back in.
-
-Enable via GNOME Extensions app or:
+Enable the extension:
 
 ```bash
 gnome-extensions enable nowplay@LalaloyXyz
 ```
 
-## Usage
+Restart GNOME Shell or log out and back in.
 
-Once enabled, hover your mouse over the clock in the top panel (or click it) to open the Now Play popup. The popup shows:
+---
 
-- Album artwork (or a fallback audio icon)
-- Track title (bold)
-- Artist name
-- Play/pause status pill
-- Progress bar with elapsed / total time
-- Playback controls (skip back, play/pause, skip forward)
+## 🚀 Usage
 
-Move your cursor away and the popup auto-closes after a short delay. Hover back over it to keep it open.
+1. Start playing music.
+2. Hover over the GNOME top-panel clock.
+3. The Now Play popup will appear.
+4. Control playback directly from the popup.
 
-## Support
+The popup provides:
 
-- [Ko-fi](https://ko-fi.com/pleumlookchill)
+- Album artwork
+- Track title
+- Artist information
+- Media player icon
+- Playback progress
+- Media controls
+
+---
+
+## 🤝 Contributing
+
+Contributions, bug reports, and feature requests are welcome.
+
+Feel free to open an issue or submit a pull request.
+
+---
+
+## ❤️ Support
+
+If you enjoy this project and would like to support its development:
+
+<a href="https://buymeacoffee.com/banditpetsw">
+  <img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=for-the-badge">
+</a>
+
+---
+
+## 📄 License
+
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
+
+See the [LICENSE](LICENSE) file for details.
+
+https://www.gnu.org/licenses/gpl-3.0.en.html
+
+---
+
+<div align="center">
+
+Made with ❤️ for GNOME
+
+</div>
