@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" width="128" alt="Now Play">
+<img src="https://extensions.gnome.org/extension-data/icons/icon_10105.png" width="128" alt="Now Play">
 
 # 🎵 Now Play
 
