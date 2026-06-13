@@ -59,7 +59,6 @@ Designed to feel native to GNOME while staying clean, fast.
 ### 🖱 Easy Access
 
 - Hover over the clock to open
-- Click the clock to toggle
 - Automatically hides when inactive
 - Stays open while hovered
 - Close instantly with the Escape key
