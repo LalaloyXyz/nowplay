@@ -161,26 +161,6 @@ Feel free to open an issue or submit a pull request.
 
 ---
 
-## ❤️ Support
-
-If you enjoy this project and would like to support its development:
-
-<a href="https://buymeacoffee.com/banditpetsw">
-  <img src="https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=for-the-badge">
-</a>
-
----
-
-## 📄 License
-
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
-
-See the [LICENSE](LICENSE) file for details.
-
-https://www.gnu.org/licenses/gpl-3.0.en.html
-
----
-
 <div align="center">
 
 Made with ❤️ for GNOME
