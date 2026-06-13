@@ -2,7 +2,7 @@
 
 <img src="https://extensions.gnome.org/extension-data/icons/icon_10105.png" width="128" alt="Now Play">
 
-# 🎵 Now Play
+# Now Play
 
 ### A beautiful media controller for GNOME Shell that brings your music controls right to the clock menu.
 
