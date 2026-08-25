@@ -20,23 +20,6 @@ export class MprisDataFetcher {
         return this._activePlayer ? this._players[this._activePlayer] : null;
     }
 
-    enable() {
-        this._enabled = true;
-        this._scanPlayers();
-        this._watchNameOwnerChanges();
-    }
-
-    disable() {
-        this._enabled = false;
-
-        for (const id of this._dbusSubIds)
-            Gio.DBus.session.signal_unsubscribe(id);
-
-        this._dbusSubIds = [];
-        this._players = {};
-        this._activePlayer = null;
-    }
-
     sendControl(method) {
         if (!this._activePlayer) return;
 
@@ -46,26 +29,6 @@ export class MprisDataFetcher {
             'org.mpris.MediaPlayer2.Player',
             method,
             null,
-            null,
-            Gio.DBusCallFlags.NONE,
-            -1,
-            null,
-            () => {}
-        );
-    }
-
-    setPosition(microseconds) {
-        if (!this._activePlayer) return;
-
-        const player = this._players[this._activePlayer];
-        if (!player || !player.trackId || player.trackLen <= 0) return;
-
-        Gio.DBus.session.call(
-            this._activePlayer,
-            '/org/mpris/MediaPlayer2',
-            'org.mpris.MediaPlayer2.Player',
-            'SetPosition',
-            GLib.Variant.new('(ox)', [player.trackId, microseconds]),
             null,
             Gio.DBusCallFlags.NONE,
             -1,
@@ -84,17 +47,34 @@ export class MprisDataFetcher {
             GLib.Variant.new('(s)', ['org.mpris.MediaPlayer2.Player'])
         );
         const player = this.activePlayer;
+        if (!player) return null;
         const props = result.deep_unpack()[0];
-        const position = this._readPosition(props, player?.position || 0);
+        const position = this._readPosition(props, player.position);
         const status = this._unpackValue(props.PlaybackStatus);
 
-        if (player && status)
+        if (status)
             player.status = status;
 
-        if (player)
-            this._setPlayerPosition(player, position);
+        this._setPlayerPosition(player, position);
 
         return { position, player };
+    }
+
+    enable() {
+        this._enabled = true;
+        this._scanPlayers();
+        this._watchNameOwnerChanges();
+    }
+
+    disable() {
+        this._enabled = false;
+
+        for (const id of this._dbusSubIds)
+            Gio.DBus.session.signal_unsubscribe(id);
+
+        this._dbusSubIds = [];
+        this._players = {};
+        this._activePlayer = null;
     }
 
     async _scanPlayers() {
@@ -150,6 +130,7 @@ export class MprisDataFetcher {
             trackLen: 0,
             position: 0,
             positionUpdatedAt: 0,
+            appIconName: null,
         };
 
         const subId = Gio.DBus.session.signal_subscribe(
@@ -168,6 +149,7 @@ export class MprisDataFetcher {
         this._dbusSubIds.push(subId);
 
         await this._refreshPlayer(busName);
+        await this._fetchAppInfo(busName);
     }
 
     _onPlayerVanished(busName) {
@@ -216,6 +198,69 @@ export class MprisDataFetcher {
         } catch (_e) {
             // The player can disappear while GNOME Shell is asking it for properties.
         }
+    }
+
+    async _fetchAppInfo(busName) {
+        if (!this._enabled) return;
+
+        // Get DesktopEntry from the root org.mpris.MediaPlayer2 interface.
+        // This maps to the .desktop file name (e.g. 'spotify', 'firefox')
+        // and works as a system icon name for the app badge.
+        try {
+            const result = await this._dbusCall(
+                busName,
+                'Get',
+                GLib.Variant.new('(ss)', ['org.mpris.MediaPlayer2', 'DesktopEntry'])
+            );
+            const player = this._players[busName];
+            if (!player) return;
+            const entry = this._unpackValue(result.deep_unpack()[0]);
+            if (entry && typeof entry === 'string')
+                player.appIconName = this._resolveAppIconName(entry);
+        } catch (_e) {
+            // Fallback: extract app name from the bus name itself
+            // e.g. org.mpris.MediaPlayer2.spotify -> spotify
+            const player = this._players[busName];
+            if (!player) return;
+            const match = busName.match(/org\.mpris\.MediaPlayer2\.(.+)/);
+            if (match) {
+                // Firefox-family players add an instance marker
+                // (firefox.instance_1_91) that isn't part of the app name.
+                const name = match[1].replace(/\.instance_\d+$/, '');
+                player.appIconName = this._resolveAppIconName(name);
+            }
+        }
+    }
+
+    // DesktopEntry can be a flatpak-style ID (e.g. org.mozilla.firefox)
+    // whose icon lives in the theme under a different name (firefox), or a
+    // short name (zen) whose desktop file is a flatpak ID
+    // (app.zen_browser.zen). Resolve via the .desktop file's Icon key,
+    // scanning app-info dirs for a matching ID, then fall back to the last
+    // dotted segment.
+    _resolveAppIconName(entry) {
+        try {
+            const appInfo = Gio.DesktopAppInfo.new(`${entry}.desktop`);
+            const names = appInfo?.get_icon()?.get_names?.();
+            if (names?.length)
+                return names[0];
+        } catch (_e) {}
+
+        // Flatpak: there's no `zen.desktop`, but app.zen_browser.zen.desktop
+        // exists and carries the icon name that the theme actually has.
+        for (const appInfo of Gio.AppInfo.get_all()) {
+            const id = appInfo.get_id() || '';
+            if (!id.endsWith(`${entry}.desktop`)) continue;
+
+            try {
+                const names = appInfo.get_icon()?.get_names?.();
+                if (names?.length)
+                    return names[0];
+            } catch (_e) {}
+            break;
+        }
+
+        return entry.split('.').pop() || entry;
     }
 
     _selectActivePlayer() {

@@ -22,7 +22,6 @@ export default class DinamicMediaPopup extends Extension {
             name: this.metadata.name,
             onOpenPopup: () => this._openPopup(),
             onControl: method => this._data?.sendControl(method),
-            onSeek: position => this._data?.setPosition(position),
         });
         this._ui.enable();
 

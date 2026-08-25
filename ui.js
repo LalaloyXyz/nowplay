@@ -2,7 +2,9 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import St from 'gi://St';
 import Gio from 'gi://Gio';
 import Clutter from 'gi://Clutter';
+import Cogl from 'gi://Cogl';
 import GLib from 'gi://GLib';
+import GdkPixbuf from 'gi://GdkPixbuf';
 
 import { debugLog } from './debug.js';
 
@@ -30,13 +32,55 @@ const THEME = {
     radius: 35,
 };
 
+// Scales the art to fit `size` and cuts rounded corners directly in the
+// pixel buffer (cairo isn't exposed to GJS on modern shells). St never
+// clips children to border-radius, so the corners must be transparent.
+function _roundArtPixbuf(pixbuf, size, radius) {
+    const scale = Math.min(size / pixbuf.get_width(), size / pixbuf.get_height());
+    const w = Math.max(1, Math.round(pixbuf.get_width() * scale));
+    const h = Math.max(1, Math.round(pixbuf.get_height() * scale));
+    const scaled = (w === pixbuf.get_width() && h === pixbuf.get_height())
+        ? pixbuf
+        : pixbuf.scale_simple(w, h, GdkPixbuf.InterpType.BILINEAR);
+
+    const rgba = scaled.get_has_alpha()
+        ? scaled
+        : scaled.add_alpha(false, 0, 0, 0);
+
+    const data = rgba.get_pixels(); // copy — the pixbuf is rebuilt below
+    const stride = rgba.get_rowstride();
+    const R = Math.min(radius, w / 2, h / 2);
+    const hw = w / 2;
+    const hh = h / 2;
+
+    for (let y = 0; y < h; y++) {
+        const row = y * stride;
+        for (let x = 0; x < w; x++) {
+            // Signed distance to the rounded rectangle, measured from the
+            // pixel center; coverage = clamp(0.5 - d) gives a 1px AA edge.
+            const px = x + 0.5 - hw;
+            const py = y + 0.5 - hh;
+            const qx = Math.abs(px) - (hw - R);
+            const qy = Math.abs(py) - (hh - R);
+            const ax = Math.max(qx, 0);
+            const ay = Math.max(qy, 0);
+            const d = Math.hypot(ax, ay) + Math.min(Math.max(qx, qy), 0) - R;
+            const coverage = Math.min(1, Math.max(0, 0.5 - d));
+            data[row + x * 4 + 3] = Math.round(data[row + x * 4 + 3] * coverage);
+        }
+    }
+
+    // The pixbuf keeps the GBytes alive, so rebuilding from the buffer is safe.
+    return GdkPixbuf.Pixbuf.new_from_bytes(new GLib.Bytes(data),
+        GdkPixbuf.Colorspace.RGB, true, 8, w, h, stride);
+}
+
 export class DinamicUi {
-    constructor({ uuid, name, onOpenPopup, onControl, onSeek }) {
+    constructor({ uuid, name, onOpenPopup, onControl }) {
         this._uuid = uuid;
         this._name = name;
         this._onOpenPopup = onOpenPopup;
         this._onControl = onControl;
-        this._onSeek = onSeek || (() => {});
         this._clockButton = null;
         this._clockButtonHandler = null;
         this._popup = null;
@@ -45,7 +89,6 @@ export class DinamicUi {
         this._popupVisible = false;
         this._progressOuter = null;
         this._progressFill = null;
-        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
         this._eqTimers = [];
@@ -148,20 +191,17 @@ export class DinamicUi {
 
         const [x, y] = this._getPopupPosition();
         if (CONFIG.animDuration > 0) {
-            // Start as a pill: narrow + compressed, centred on target position
             this._popup.opacity = 0;
             this._popup.set_pivot_point(0.5, 0.5);
             this._popup.set_scale(0.32, 0.52);
             this._popup.set_position(x, y);
 
-            // Fade in quickly
             this._popup.ease({
                 opacity: 255,
                 duration: 120,
                 mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             });
 
-            // Single-overshoot spring — pops open and settles, no shake
             this._popup.ease({
                 scale_x: 1,
                 scale_y: 1,
@@ -189,7 +229,6 @@ export class DinamicUi {
         }
 
         if (CONFIG.animCloseDuration > 0) {
-            // Squeeze back into a pill then vanish — reverse of the open spring
             this._popup.ease({
                 scale_x: 0.38,
                 scale_y: 0.48,
@@ -241,10 +280,8 @@ export class DinamicUi {
 
         this._progressOuter = null;
         this._progressFill = null;
-        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
-        this._draggingProgress = false;
         this._popup.style = this._getPopupStyle();
 
         const mainBox = new St.BoxLayout({
@@ -267,19 +304,7 @@ export class DinamicUi {
             const frac = Math.min(1, safePosition / player.trackLen);
             const width = this._progressOuter?.get_width?.() || 0;
             if (width > 0) {
-                const targetWidth = Math.round(width * frac);
-                if (this._draggingProgress) {
-                    // Instant snap during drag — no easing fighting the mouse
-                    this._progressFill.remove_all_transitions();
-                    this._progressFill.set_width(targetWidth);
-                } else {
-                    // Smooth glide for playback tick updates
-                    this._progressFill.ease({
-                        width: targetWidth,
-                        duration: 900,
-                        mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
-                    });
-                }
+                this._progressFill.width = Math.round(width * frac);
             }
         }
 
@@ -296,15 +321,6 @@ export class DinamicUi {
         }
     }
 
-    _updateThumbPosition(fillWidth) {
-        if (!this._progressThumb || !this._progressOuter) return;
-
-        const thumbX = fillWidth - 7;
-        const barHeight = this._progressOuter.get_height() || 6;
-        const thumbY = Math.max(0, (barHeight - 14) / 2);
-        this._progressThumb.set_position(Math.max(0, thumbX), thumbY);
-    }
-
     _removePopup() {
         if (!this._popup) return;
 
@@ -315,7 +331,6 @@ export class DinamicUi {
         this._popup = null;
         this._progressOuter = null;
         this._progressFill = null;
-        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
     }
@@ -361,11 +376,11 @@ export class DinamicUi {
         artistLabel.clutter_text.set_ellipsize(3);
         rightBox.add_child(artistLabel);
 
+        // Passive progress bar — display only, no seek interaction
         const progOuter = new St.BoxLayout({
             style: 'background-color: rgba(255,255,255,0.13); height: 6px; border-radius: 99px; margin-top: 8px;',
             x_expand: true,
-            reactive: true,
-            track_hover: true,
+            reactive: false,
         });
         this._progressOuter = progOuter;
         this._progressFill = new St.BoxLayout({
@@ -374,69 +389,20 @@ export class DinamicUi {
         });
         progOuter.add_child(this._progressFill);
 
-        this._progressThumb = new St.Widget({
-            style: `
-                width: 14px;
-                height: 14px;
-                border-radius: 7px;
-                background-color: ${THEME.progress};
-                box-shadow: 0 0 10px rgba(52, 211, 153, 0.45);
-            `,
-            x_expand: false,
-            y_expand: false,
-            y_align: Clutter.ActorAlign.CENTER,
+        // Content is built before the popup is added to the layout, so the
+        // track has no width yet and the fill can't be sized here. Apply
+        // the real position once the track gets its first allocation
+        // instead of waiting for the next position poll tick.
+        const fill = this._progressFill;
+        const sizeId = progOuter.connect('notify::width', () => {
+            const width = progOuter.get_width();
+            if (width <= 0) return;
+            const frac = Math.min(1, (player.position || 0) / (player.trackLen || 1));
+            fill.width = Math.round(width * frac);
+            progOuter.disconnect(sizeId);
         });
-        this._progressThumb.hide();
-        progOuter.add_child(this._progressThumb);
 
         rightBox.add_child(progOuter);
-
-        let dragging = false;
-        let lastSeekCall = 0;
-
-        const seekFromEvent = (actor, event) => {
-            const [stageX] = event.get_coords();
-            const [actorX] = actor.get_transformed_position();
-            const width = actor.get_width();
-            if (width <= 0) return;
-            const frac = Math.max(0, Math.min(1, (stageX - actorX) / width));
-            const position = Math.round(frac * player.trackLen);
-
-            // Snap visual immediately — no throttle on layout updates
-            this.updateProgress(position, player);
-            this._updateThumbPosition(Math.round(frac * width));
-
-            // Throttle D-Bus SetPosition to ~10/sec during drag
-            const now = GLib.get_monotonic_time();
-            if (now - lastSeekCall >= 100000) {
-                this._onSeek(position);
-                lastSeekCall = now;
-            }
-        };
-
-        progOuter.connect('button-press-event', (actor, event) => {
-            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
-            dragging = true;
-            this._draggingProgress = true;
-            this._progressThumb?.show();
-            seekFromEvent(actor, event);
-            return Clutter.EVENT_STOP;
-        });
-
-        progOuter.connect('motion-event', (actor, event) => {
-            if (!dragging) return Clutter.EVENT_PROPAGATE;
-            seekFromEvent(actor, event);
-            return Clutter.EVENT_STOP;
-        });
-
-        progOuter.connect('button-release-event', (actor, event) => {
-            if (event.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
-            dragging = false;
-            this._draggingProgress = false;
-            this._progressThumb?.hide();
-            seekFromEvent(actor, event);
-            return Clutter.EVENT_STOP;
-        });
 
         const trackTime = player.trackLen ? this._formatTime(player.trackLen) : '0:00';
         const timeRow = new St.BoxLayout({
@@ -458,7 +424,6 @@ export class DinamicUi {
         rightBox.add_child(timeRow);
 
         rightBox.add_child(this._createControls(player));
-        progOuter.connect('notify::width', () => this.updateProgress(player.position, player));
         this.updateProgress(player.position, player);
         return rightBox;
     }
@@ -470,23 +435,20 @@ export class DinamicUi {
             icon_size: 118,
         });
 
-        if (player.artUrl) {
-            try {
-                const file = Gio.File.new_for_uri(player.artUrl);
-                artIcon.gicon = Gio.FileIcon.new(file);
-                artIcon.icon_size = 118;
-            } catch (_e) {
-                // Keep the generic fallback icon if the player gives a bad art URL.
-            }
-        }
+        // St never clips children to border-radius, so the art is
+        // pre-rounded — corners cut to transparent in the pixel buffer
+        // (_roundArtPixbuf) — before it's shown. Loaded via Gio async,
+        // which works on every supported shell.
 
-        const artFrame = new St.Bin({
-            child: artIcon,
+        const artFrame = new St.Widget({
+            layout_manager: new Clutter.FixedLayout(),
+            width: 125,
+            height: 125,
             style: `
-                width: 118px;
-                height: 118px;
+                width: 125px;
+                height: 125px;
                 padding: 0;
-                border-radius: 28px;
+                border-radius: 20px;
                 background-color: rgba(255, 255, 255, 0.08);
                 border: 1px solid rgba(255, 255, 255, 0.12);
                 box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42);
@@ -494,8 +456,108 @@ export class DinamicUi {
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
         });
+        artFrame.add_child(artIcon);
 
-        return artFrame;
+        if (player.artUrl) {
+            let file = null;
+            try {
+                file = Gio.File.new_for_uri(player.artUrl);
+            } catch (_e) {
+                // Keep the generic fallback icon if the player gives a bad art URL.
+            }
+
+            if (file) {
+                // Keep the fallback hidden while loading so it doesn't
+                // flash as "not found"; it only reappears on failure.
+                artIcon.opacity = 0;
+                file.load_contents_async(null, (f, res) => {
+                    if (!artIcon.get_parent()) return; // popup closed/rebuilt
+
+                    let pixbuf = null;
+                    try {
+                        const [ok, bytes] = f.load_contents_finish(res);
+                        if (ok && bytes) {
+                            const loader = GdkPixbuf.PixbufLoader.new();
+                            loader.write(bytes);
+                            loader.close();
+                            pixbuf = loader.get_pixbuf();
+                        }
+                    } catch (_e) {}
+
+                    if (!pixbuf) {
+                        artIcon.opacity = 255;
+                        return;
+                    }
+
+                    // St.Icon lost its pixbuf setter on newer shells, so the
+                    // rounded art is shown as raw RGBA in an StImageContent —
+                    // the same content type St.TextureCache fills.
+                    const rounded = _roundArtPixbuf(pixbuf, 125, 20);
+                    const content = new St.ImageContent();
+                    try {
+                        content.set_bytes(
+                            Clutter.get_default_backend().get_cogl_context(),
+                            new GLib.Bytes(rounded.get_pixels()),
+                            Cogl.PixelFormat.RGBA_8888,
+                            rounded.get_width(),
+                            rounded.get_height(),
+                            rounded.get_rowstride());
+                    } catch (_e) {
+                        artIcon.opacity = 255;
+                        return;
+                    }
+
+                    const artImage = new Clutter.Actor({
+                        content,
+                        width: 125,
+                        height: 125,
+                    });
+                    artImage.set_position(0, 0);
+                    artFrame.add_child(artImage);
+                    // The fallback stays hidden behind the art — it would
+                    // show through the transparent rounded corners.
+                });
+            }
+        }
+
+        // Wrap art + badge using FixedLayout so set_position() is respected
+        const wrapper = new St.Widget({
+            layout_manager: new Clutter.FixedLayout(),
+            width: 125,
+            height: 125,
+            x_align: Clutter.ActorAlign.CENTER,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        artFrame.set_position(0, 0);
+        wrapper.add_child(artFrame);
+
+        const appIcon = player.appIconName;
+        if (appIcon) {
+            const badgeIcon = new St.Icon({
+                // default fallbacks render a generic app icon instead of
+                // leaving the badge blank when the name isn't in the theme
+                gicon: Gio.ThemedIcon.new_with_default_fallbacks(appIcon),
+                icon_size: 30,
+                style: 'width: 30px; height: 30px;',
+            });
+            const badge = new St.Bin({
+                child: badgeIcon,
+                style: `
+                    width: 32px;
+                    height: 32px;
+                    border-radius: 8px;
+                    background-color: rgba(10, 10, 12, 0.88);
+                    border: 1px solid rgba(255, 255, 255, 0.18);
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+                `,
+            });
+            // 118 - 28 (badge) - 4 (margin) = 86, bottom-right
+            badge.set_position(92, 92);
+            wrapper.add_child(badge);
+        }
+
+        return wrapper;
     }
 
     _createStatusPill(player) {
@@ -528,37 +590,32 @@ export class DinamicUi {
             barBox.add_child(bar);
         }
 
-        // Equalizer up-down animation when playing
+        // Equalizer true up-down loop when playing
         if (isPlaying) {
             this._eqActive = true;
             bars.forEach((bar, i) => {
-                const bob = () => {
+                const animateUp = () => {
                     if (!this._eqActive || !bar.get_parent()) return;
                     bar.ease({
                         scale_y: barHeights[i],
                         duration: barSpeeds[i],
                         mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-                        onComplete: () => {
-                            bob();
-                        },
+                        onComplete: () => animateDown(),
                     });
                 };
-                // First half: rise up
-                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 100, () => {
+                const animateDown = () => {
+                    if (!this._eqActive || !bar.get_parent()) return;
                     bar.ease({
-                        scale_y: barHeights[i],
+                        scale_y: 1.0,
                         duration: barSpeeds[i],
                         mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-                        onComplete: () => {
-                            // Fall back and loop
-                            bar.ease({
-                                scale_y: 1.0,
-                                duration: barSpeeds[i],
-                                mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
-                            });
-                            bob();
-                        },
+                        onComplete: () => animateUp(),
                     });
+                };
+
+                // Stagger bar starts so they move at different phases
+                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 110, () => {
+                    animateUp();
                     return GLib.SOURCE_REMOVE;
                 });
                 this._eqTimers.push(id);
@@ -634,20 +691,6 @@ export class DinamicUi {
         });
         button.connect('clicked', callback);
         return button;
-    }
-
-    _createColumn(width, height = null) {
-        const column = new St.BoxLayout({
-            vertical: true,
-            reactive: true,
-            can_focus: true,
-            track_hover: true,
-        });
-
-        if (width) column.set_width(width);
-        if (height) column.set_height(height);
-
-        return column;
     }
 
     _getPopupStyle() {
