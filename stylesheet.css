@@ -36,3 +36,17 @@
 .dinamic-popup .dinamic-primary-button:active {
     background-color: rgba(52, 211, 153, 0.92) !important;
 }
+
+/* player selector pill (own chrome actor below the popup) — hover effect */
+.dinamic-player-pill:hover {
+    background-color: rgba(255, 255, 255, 0.18) !important;
+}
+
+/* player selector dropdown — custom frame items */
+.dinamic-player-menu-item:hover {
+    background-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+.dinamic-player-menu-item:active {
+    background-color: rgba(52, 211, 153, 0.24) !important;
+}

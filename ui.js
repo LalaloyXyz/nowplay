@@ -23,6 +23,7 @@ const THEME = {
     border: 'rgba(255, 255, 255, 0.11)',
     highlight: 'rgba(255, 255, 255, 0.16)',
     progress: '#ffffff',
+    accent: '#34d399',
     accentSoft: 'rgba(52, 211, 153, 0.18)',
     text: '#ffffff',
     mutedText: '#c7c7cc',
@@ -75,12 +76,22 @@ function _roundArtPixbuf(pixbuf, size, radius) {
         GdkPixbuf.Colorspace.RGB, true, 8, w, h, stride);
 }
 
+// Player display name for the selector: the resolved icon name (usually the
+// app name, e.g. 'spotify'), else the bus name with the MPRIS prefix stripped.
+function _prettyPlayerName(player) {
+    const raw = player.appIconName
+        || (player.busName || '').replace(/^org\.mpris\.MediaPlayer2\./, '');
+    if (!raw) return 'Unknown Player';
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 export class DinamicUi {
-    constructor({ uuid, name, onOpenPopup, onControl }) {
+    constructor({ uuid, name, onOpenPopup, onControl, onSelectPlayer }) {
         this._uuid = uuid;
         this._name = name;
         this._onOpenPopup = onOpenPopup;
         this._onControl = onControl;
+        this._onSelectPlayer = onSelectPlayer;
         this._clockButton = null;
         this._clockButtonHandler = null;
         this._popup = null;
@@ -93,6 +104,12 @@ export class DinamicUi {
         this._playPauseIcon = null;
         this._eqTimers = [];
         this._eqActive = false;
+        this._menuEqTimers = [];
+        this._playerPill = null;
+        this._playerMenu = null;
+        this._playerMenuOpen = false;
+        this._playerGrab = null;
+        this._playerSelected = false;
     }
 
     get popupVisible() {
@@ -155,7 +172,7 @@ export class DinamicUi {
             this.showPopup(player);
     }
 
-    showPopup(player) {
+    showPopup(player, players) {
         if (!player || this._popup) return;
 
         this._popup = new St.BoxLayout({
@@ -167,7 +184,7 @@ export class DinamicUi {
             track_hover: true,
         });
 
-        this.buildPopupContent(player);
+        this.buildPopupContent(player, players);
         Main.layoutManager.addChrome(this._popup, { trackFullscreen: true });
 
         this._popupHandler = this._popup.connectObject(
@@ -183,7 +200,8 @@ export class DinamicUi {
                 return Clutter.EVENT_PROPAGATE;
             },
             'leave-event', () => {
-                this._scheduleClose(CONFIG.popupLeaveCloseDelay);
+                if (!this._playerMenuOpen && !this._pointerInsidePlayerPill())
+                    this._scheduleClose(CONFIG.popupLeaveCloseDelay);
                 return Clutter.EVENT_PROPAGATE;
             }
         );
@@ -213,6 +231,10 @@ export class DinamicUi {
             this._popup.opacity = 255;
         }
 
+        // The selector pill (if any) centers under the popup once the
+        // popup has its final position.
+        this._placePlayerPill();
+
         this._popupVisible = true;
         this._scheduleClose(CONFIG.autoCloseDelay);
     }
@@ -220,6 +242,8 @@ export class DinamicUi {
     destroyPopup() {
         if (!this._popup) return;
 
+        this._destroyPlayerMenu();
+        this._destroyPlayerPill(true);
         this._clearCloseTimer();
         this._clearEqAnimation();
 
@@ -272,8 +296,14 @@ export class DinamicUi {
         this._eqTimers = [];
     }
 
-    buildPopupContent(player) {
-        if (!this._popup || !player) return;
+    buildPopupContent(player, players) {
+        if (!this._popup || !player) {
+            this._playerSelected = false;
+            return;
+        }
+
+        this._destroyPlayerMenu();
+        this._destroyPlayerPill();
 
         for (const child of this._popup.get_children().slice())
             child.destroy();
@@ -295,6 +325,32 @@ export class DinamicUi {
 
         mainBox.add_child(this._createArtFrame(player));
         mainBox.add_child(this._createDetails(player));
+
+        if ((players?.length ?? 0) > 1)
+            this._createPlayerPill(players, player);
+
+        // Pop only when the dropdown selection caused this rebuild — control
+        // buttons (play/pause can switch the active player in auto mode) must
+        // not bounce the card.
+        if (this._playerSelected) {
+            this._playerSelected = false;
+            this._popPlayerCard();
+        }
+    }
+
+    // Quick "pop" on the card when the controlled player switches: a small
+    // scale bounce with overshoot, same feel as the entrance animation.
+    _popPlayerCard() {
+        if (!this._popup) return;
+
+        this._popup.set_pivot_point(0.5, 0.5);
+        this._popup.set_scale(0.9, 0.9);
+        this._popup.ease({
+            scale_x: 1,
+            scale_y: 1,
+            duration: CONFIG.animCloseDuration,
+            mode: Clutter.AnimationMode.EASE_OUT_BACK,
+        });
     }
 
     updateProgress(position, player) {
@@ -424,6 +480,7 @@ export class DinamicUi {
         rightBox.add_child(timeRow);
 
         rightBox.add_child(this._createControls(player));
+
         this.updateProgress(player.position, player);
         return rightBox;
     }
@@ -449,9 +506,7 @@ export class DinamicUi {
                 height: 125px;
                 padding: 0;
                 border-radius: 20px;
-                background-color: rgba(255, 255, 255, 0.08);
-                border: 1px solid rgba(255, 255, 255, 0.12);
-                box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42);
+                background-color: rgba(0, 0, 0, 0);
             `,
             x_align: Clutter.ActorAlign.CENTER,
             y_align: Clutter.ActorAlign.CENTER,
@@ -691,6 +746,446 @@ export class DinamicUi {
         });
         button.connect('clicked', callback);
         return button;
+    }
+
+    // Compact standalone trigger for the player dropdown: its own chrome
+    // actor below the popup, so the selector isn't part of the popup frame.
+    _createPlayerPill(players, activePlayer) {
+        const statusRank = { Playing: 0, Paused: 1 };
+        const sorted = [...players].sort((a, b) =>
+            (statusRank[a.status] ?? 2) - (statusRank[b.status] ?? 2));
+
+        // The pill previews the other player — never the one the popup
+        // shows — so the selector always offers something new. Sorting
+        // Playing players first picks a playing app when there is one.
+        const display = sorted.find(p => p.busName !== activePlayer?.busName) || activePlayer;
+
+        const icon = new St.Icon({
+            icon_name: 'audio-x-generic-symbolic',
+            icon_size: 16,
+            style: 'width: 16px; height: 16px;',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        if (display.appIconName) {
+            icon.gicon = Gio.ThemedIcon.new_with_default_fallbacks(display.appIconName);
+        }
+
+        const label = new St.Label({
+            text: _prettyPlayerName(display),
+            style: `font-size: 12px; font-weight: 600; color: ${THEME.mutedText};`,
+        });
+        label.clutter_text.set_ellipsize(3);
+
+        const sepLabel = new St.Label({
+            text: ':',
+            style: `font-size: 12px; font-weight: 600; color: ${THEME.dimText};`,
+        });
+
+        const songLabel = new St.Label({
+            text: display.title || '',
+            style: `font-size: 12px; color: ${THEME.dimText};`,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        songLabel.clutter_text.set_ellipsize(3);
+
+        const arrow = new St.Icon({
+            icon_name: 'pan-down-symbolic',
+            icon_size: 14,
+            style: 'width: 14px; height: 14px;',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        // A reactive box, not St.Button: like the popup itself, a box
+        // allocates its children inside its own width, so a long song
+        // title can't stretch the pill past CONFIG.width (St.Button
+        // sizes to its child's natural width and grows with it).
+        // Vertical so the dropdown rows can expand inside the card below
+        // the trigger row — a modern select look.
+        const pill = new St.BoxLayout({
+            vertical: true,
+            style_class: 'dinamic-player-pill',
+            style: `
+                background-color: ${THEME.background};
+                border: 1px solid ${THEME.border};
+                border-radius: ${THEME.radius}px;
+                padding: 8px 14px;
+                width: ${CONFIG.width}px;
+                box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+            `,
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+            opacity: 0,
+        });
+
+        const trigger = new St.BoxLayout({
+            vertical: false,
+            style: 'spacing: 8px;',
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+        });
+        trigger.add_child(icon);
+        trigger.add_child(label);
+        trigger.add_child(sepLabel);
+        trigger.add_child(songLabel);
+        trigger.add_child(arrow);
+        pill.add_child(trigger);
+
+        // Only the trigger row opens/toggles the dropdown — the pill
+        // itself stays click-free so the player rows own their clicks.
+        trigger.connect('button-press-event', () => {
+            if (this._playerMenuOpen) {
+                console.log('[nowplay] trigger press: close');
+                this._closePlayerMenu();
+            } else {
+                console.log('[nowplay] trigger press: open');
+                this._openPlayerMenu(sorted, activePlayer);
+            }
+            return Clutter.EVENT_STOP;
+        });
+
+        // The pill behaves like part of the popup for close timing: entering
+        // it cancels the close, leaving it (with no menu open) starts it.
+        pill.connect('enter-event', () => {
+            this._clearCloseTimer();
+            return Clutter.EVENT_PROPAGATE;
+        });
+        pill.connect('leave-event', () => {
+            if (!this._playerMenuOpen)
+                this._scheduleClose(CONFIG.popupLeaveCloseDelay);
+            return Clutter.EVENT_PROPAGATE;
+        });
+        pill.connect('key-press-event', (_actor, event) => {
+            if (event.get_key_symbol() === Clutter.KEY_Escape && this._playerMenuOpen) {
+                this._closePlayerMenu();
+                return Clutter.EVENT_STOP;
+            }
+            return Clutter.EVENT_PROPAGATE;
+        });
+
+        // Size is only known after the first allocation; place it centered
+        // under the popup then (the popup's position is stable from showPopup).
+        pill.connect('notify::height', () => this._placePlayerPill());
+
+        this._playerPill = pill;
+        Main.layoutManager.addChrome(pill, { trackFullscreen: true });
+    }
+
+    _placePlayerPill() {
+        if (!this._playerPill || !this._popup) return;
+
+        const [px, py] = this._popup.get_position();
+        const pw = this._popup.get_width() || CONFIG.width;
+        const ph = this._popup.get_height() || CONFIG.height;
+
+        // Force the exact popup width — belt and braces on the CSS width,
+        // so the pill can never render wider than the popup.
+        this._playerPill.set_width(pw);
+        this._playerPill.set_position(
+            px + Math.floor((pw - this._playerPill.get_width()) / 2),
+            py + ph + 10);
+
+        if (this._playerPill.opacity === 0) {
+            // Same entrance as the popup: fade + pop-in scale.
+            this._playerPill.set_pivot_point(0.5, 0.5);
+            this._playerPill.set_scale(0.32, 0.52);
+            this._playerPill.ease({
+                opacity: 255,
+                duration: 120,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
+            this._playerPill.ease({
+                scale_x: 1,
+                scale_y: 1,
+                duration: CONFIG.animDuration,
+                mode: Clutter.AnimationMode.EASE_OUT_BACK,
+            });
+        }
+    }
+
+    // Animated exit on popup close, silent on content rebuild (the popup
+    // stays visible, so a shrinking pill would look broken). Same contract
+    // as _destroyPlayerMenu: no close-timer re-arm.
+    _destroyPlayerPill(animate = false) {
+        if (!this._playerPill) return;
+
+        const pill = this._playerPill;
+        this._playerPill = null;
+
+        if (animate && CONFIG.animCloseDuration > 0) {
+            pill.ease({
+                scale_x: 0.38,
+                scale_y: 0.48,
+                duration: CONFIG.animCloseDuration,
+                mode: Clutter.AnimationMode.EASE_IN_BACK,
+            });
+            pill.ease({
+                opacity: 0,
+                duration: Math.round(CONFIG.animCloseDuration * 0.6),
+                delay: Math.round(CONFIG.animCloseDuration * 0.4),
+                mode: Clutter.AnimationMode.EASE_IN_QUAD,
+                onComplete: () => this._removePlayerPill(pill),
+            });
+        } else {
+            this._removePlayerPill(pill);
+        }
+    }
+
+    _removePlayerPill(pill) {
+        if (!pill.get_parent()) return;
+
+        Main.layoutManager.removeChrome(pill);
+        pill.destroy();
+    }
+
+    // The dropdown expands inside the pill card itself (a modern select
+    // look): opening appends the player rows under the trigger row, so the
+    // same frame grows downward. An invisible full-monitor grab underneath
+    // closes it on outside click.
+    _openPlayerMenu(players, activePlayer) {
+        this._destroyPlayerMenu();
+
+        const monitor = Main.layoutManager.primaryMonitor;
+
+        // The grab must sit UNDER the card so the card keeps its clicks:
+        // add the grab first, then re-raise the card above it.
+        this._playerGrab = new St.Widget({
+            reactive: true,
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height,
+            style: 'background-color: rgba(0, 0, 0, 0);',
+        });
+        this._playerGrab.connect('button-press-event', () => {
+            this._closePlayerMenu();
+            return Clutter.EVENT_STOP;
+        });
+        Main.layoutManager.addChrome(this._playerGrab);
+
+        Main.layoutManager.removeChrome(this._playerPill);
+        Main.layoutManager.addChrome(this._playerPill, { trackFullscreen: true });
+
+        const items = new St.BoxLayout({
+            vertical: true,
+            style: `
+                spacing: 2px;
+                margin-top: 8px;
+                padding-top: 8px;
+                border-top: 1px solid rgba(255, 255, 255, 0.10);
+            `,
+            opacity: 0,
+        });
+        for (const player of players) {
+            items.add_child(this._createPlayerMenuItem(player,
+                player.busName === activePlayer?.busName, activePlayer));
+        }
+
+        this._playerPill.add_child(items);
+        this._playerMenu = items;
+        this._playerMenuOpen = true;
+        this._clearCloseTimer();
+        this._playerPill.grab_key_focus();
+
+        // The card grows downward from the same top edge; animate the rows in.
+        // (Note: St widgets have no set_scale_y() in GJS — use two-arg
+        // set_scale() like the popup's entrance.)
+        items.set_pivot_point(0.5, 0);
+        items.set_scale(1, 0.9);
+        items.ease({
+            opacity: 255,
+            duration: 120,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+        });
+        items.ease({
+            scale_y: 1,
+            duration: 160,
+            mode: Clutter.AnimationMode.EASE_OUT_BACK,
+        });
+    }
+
+    _createPlayerMenuItem(player, isActive, activePlayer) {
+        const icon = new St.Icon({
+            icon_name: 'audio-x-generic-symbolic',
+            icon_size: 16,
+            style: 'width: 16px; height: 16px;',
+        });
+        if (player.appIconName) {
+            icon.gicon = Gio.ThemedIcon.new_with_default_fallbacks(player.appIconName);
+        }
+
+        const name = new St.Label({
+            text: _prettyPlayerName(player),
+            style: `font-size: 12px; font-weight: 700; color: ${THEME.text};`,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        name.clutter_text.set_ellipsize(3);
+
+        const song = new St.Label({
+            text: player.title || '',
+            style: `font-size: 11px; color: ${THEME.dimText};`,
+            x_expand: true,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        song.clutter_text.set_ellipsize(3);
+
+        const box = new St.BoxLayout({
+            vertical: false,
+            style: 'spacing: 10px;',
+            x_expand: true,
+        });
+        box.add_child(icon);
+        box.add_child(name);
+        box.add_child(song);
+
+        // Only the controlled player's row dances when it's actually
+        // playing — other rows that report Playing stay still, so exactly
+        // one animation shows. Otherwise the controlled row gets the check.
+        if (player.status === 'Playing' && player.busName === activePlayer?.busName)
+            box.add_child(this._createMenuEq());
+        else if (isActive) {
+            box.add_child(new St.Icon({
+                icon_name: 'object-select-symbolic',
+                icon_size: 14,
+                style: `width: 14px; height: 14px; color: ${THEME.accent};`,
+                y_align: Clutter.ActorAlign.CENTER,
+            }));
+        }
+
+        const item = new St.Button({
+            style_class: 'dinamic-player-menu-item',
+            style: `
+                border-radius: ${THEME.radius}px;
+                padding: 10px 12px;
+            `,
+            child: box,
+            reactive: true,
+            can_focus: true,
+            track_hover: true,
+            x_expand: true,
+        });
+        item.connect('clicked', () => {
+            console.log(`[nowplay] item clicked: ${player.busName}`);
+            this._closePlayerMenu();
+            this._playerSelected = true;
+            this._onSelectPlayer(player.busName);
+            this._scheduleClose(CONFIG.autoCloseDelay);
+        });
+        return item;
+    }
+
+    // Mini animated equalizer for the playing row, accent-colored. Only the
+    // startup timeouts are tracked; the ease chain dies with the bars.
+    _createMenuEq() {
+        const barBox = new St.BoxLayout({
+            vertical: false,
+            style: 'spacing: 2px;',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        const heights = [5, 2, 6];
+        const scales = [1.8, 1.3, 2.2];
+        const speeds = [420, 360, 500];
+
+        heights.forEach((base, i) => {
+            const bar = new St.Widget({
+                style: `
+                    width: 3px;
+                    min-height: 4px;
+                    height: ${base}px;
+                    background-color: ${THEME.accent};
+                    border-radius: 2px;
+                `,
+            });
+            bar.set_pivot_point(0.5, 1.0);
+            barBox.add_child(bar);
+
+            const animateUp = () => {
+                if (!bar.get_parent()) return;
+                bar.ease({
+                    scale_y: scales[i],
+                    duration: speeds[i],
+                    mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                    onComplete: () => animateDown(),
+                });
+            };
+            const animateDown = () => {
+                if (!bar.get_parent()) return;
+                bar.ease({
+                    scale_y: 1.0,
+                    duration: speeds[i],
+                    mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
+                    onComplete: () => animateUp(),
+                });
+            };
+
+            const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 90, () => {
+                animateUp();
+                return GLib.SOURCE_REMOVE;
+            });
+            this._menuEqTimers.push(id);
+        });
+
+        return barBox;
+    }
+
+    // User-facing close: tears the dropdown down, then re-arms the popup
+    // close timer based on where the pointer is.
+    _closePlayerMenu() {
+        const hadMenu = this._playerMenu !== null;
+        this._destroyPlayerMenu();
+        if (!hadMenu) return;
+
+        if (this._popup) {
+            this._popup.grab_key_focus();
+            const delay = this._pointerInsidePopup() || this._pointerInsidePlayerPill()
+                ? CONFIG.autoCloseDelay
+                : CONFIG.popupLeaveCloseDelay;
+            this._scheduleClose(delay);
+        }
+    }
+
+    _pointerInsidePopup() {
+        if (!this._popup) return true;
+
+        const [x, y] = global.get_pointer();
+        const [px, py] = this._popup.get_transformed_position();
+        const pw = this._popup.get_width();
+        const ph = this._popup.get_height();
+
+        return x >= px && x <= px + pw && y >= py && y <= py + ph;
+    }
+
+    _pointerInsidePlayerPill() {
+        if (!this._playerPill) return false;
+
+        const [x, y] = global.get_pointer();
+        const [px, py] = this._playerPill.get_transformed_position();
+        const pw = this._playerPill.get_width();
+        const ph = this._playerPill.get_height();
+
+        return x >= px && x <= px + pw && y >= py && y <= py + ph;
+    }
+
+    // Silent teardown (no close-timer re-arm): the menu rows live inside
+    // the pill card, so removing them just shrinks the card back. The grab
+    // is chrome and must be removed explicitly.
+    _destroyPlayerMenu() {
+        this._menuEqTimers.forEach(id => GLib.source_remove(id));
+        this._menuEqTimers = [];
+
+        if (this._playerMenu) {
+            this._playerMenu.destroy();
+            this._playerMenu = null;
+        }
+        if (this._playerGrab) {
+            Main.layoutManager.removeChrome(this._playerGrab);
+            this._playerGrab.destroy();
+            this._playerGrab = null;
+        }
+
+        this._playerMenuOpen = false;
     }
 
     _getPopupStyle() {

@@ -22,10 +22,11 @@ export default class DinamicMediaPopup extends Extension {
             name: this.metadata.name,
             onOpenPopup: () => this._openPopup(),
             onControl: method => this._data?.sendControl(method),
+            onSelectPlayer: busName => this._data?.setSelectedPlayer(busName),
         });
         this._ui.enable();
 
-        this._data = new MprisDataFetcher(player => this._syncPlayer(player));
+        this._data = new MprisDataFetcher((player, players) => this._syncPlayer(player, players));
         this._data.enable();
 
         debugLog('enabled');
@@ -49,7 +50,7 @@ export default class DinamicMediaPopup extends Extension {
         debugLog('disabled');
     }
 
-    _syncPlayer(player) {
+    _syncPlayer(player, players) {
         if (!this._ui) return;
 
         this._ui.updateIndicator(player);
@@ -60,14 +61,14 @@ export default class DinamicMediaPopup extends Extension {
         }
 
         if (this._ui.popupVisible)
-            this._ui.buildPopupContent(player);
+            this._ui.buildPopupContent(player, players);
     }
 
     _openPopup() {
         const player = this._data?.activePlayer;
         if (!player || !this._ui) return;
 
-        this._ui.showPopup(player);
+        this._ui.showPopup(player, this._data.playersList);
         this._startPositionPolling();
     }
 

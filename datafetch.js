@@ -8,6 +8,7 @@ export class MprisDataFetcher {
         this._onPlayersChanged = onPlayersChanged;
         this._players = {};
         this._activePlayer = null;
+        this._selectedPlayerName = null;
         this._dbusSubIds = [];
         this._enabled = false;
     }
@@ -20,11 +21,19 @@ export class MprisDataFetcher {
         return this._activePlayer ? this._players[this._activePlayer] : null;
     }
 
+    get playersList() {
+        return Object.values(this._players);
+    }
+
     sendControl(method) {
         if (!this._activePlayer) return;
 
+        this._sendControlTo(this._activePlayer, method);
+    }
+
+    _sendControlTo(busName, method) {
         Gio.DBus.session.call(
-            this._activePlayer,
+            busName,
             '/org/mpris/MediaPlayer2',
             'org.mpris.MediaPlayer2.Player',
             method,
@@ -35,6 +44,23 @@ export class MprisDataFetcher {
             null,
             () => {}
         );
+    }
+
+    // User choice wins over the automatic Playing > Paused selection while
+    // the chosen player exists. Pass null to return to automatic.
+    setSelectedPlayer(busName) {
+        if (busName !== null && !this._players[busName])
+            return;
+
+        this._selectedPlayerName = busName;
+        this._selectActivePlayer();
+
+        // Picking a player from the dropdown auto-plays it when it's not
+        // playing (Play on a player that can't play just errors harmlessly).
+        // Not in _selectActivePlayer: every refresh would re-Play the chosen
+        // player and the pause button would never stick.
+        if (busName && this._players[busName]?.status !== 'Playing')
+            this._sendControlTo(busName, 'Play');
     }
 
     async refreshActiveProgress() {
@@ -75,6 +101,7 @@ export class MprisDataFetcher {
         this._dbusSubIds = [];
         this._players = {};
         this._activePlayer = null;
+        this._selectedPlayerName = null;
     }
 
     async _scanPlayers() {
@@ -274,8 +301,23 @@ export class MprisDataFetcher {
                 paused = name;
         }
 
-        this._activePlayer = playing || paused || null;
-        this._onPlayersChanged(this.activePlayer);
+        const selected = this._selectedPlayerName && this._players[this._selectedPlayerName]
+            ? this._selectedPlayerName
+            : null;
+
+        this._activePlayer = selected || playing || paused || null;
+        this._onPlayersChanged(this.activePlayer, this.playersList);
+
+        // With a manual choice active, once the chosen player is actually
+        // playing, pause every other player that is still playing. (The
+        // paused players' own refreshes re-enter here, but their status is
+        // no longer Playing, so this settles after one round.)
+        if (selected && this._players[selected].status === 'Playing') {
+            for (const [name, info] of Object.entries(this._players)) {
+                if (name !== selected && info.status === 'Playing')
+                    this._sendControlTo(name, 'Pause');
+            }
+        }
     }
 
     _dbusCall(busName, method, params) {
