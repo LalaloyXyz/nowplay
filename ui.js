@@ -117,8 +117,7 @@ export class DinamicUi {
     }
 
     enable() {
-        this._clockButton = Main.panel.statusArea.dateMenu?.actor
-            || Main.panel.statusArea.dateMenu;
+        this._clockButton = Main.panel.statusArea.dateMenu;
 
         if (!this._clockButton) {
             debugLog('clock button not found');
@@ -326,7 +325,7 @@ export class DinamicUi {
         mainBox.add_child(this._createArtFrame(player));
         mainBox.add_child(this._createDetails(player));
 
-        if ((players?.length ?? 0) > 1)
+        if (players.length > 1)
             this._createPlayerPill(players, player);
 
         // Pop only when the dropdown selection caused this rebuild — control
@@ -356,9 +355,9 @@ export class DinamicUi {
     updateProgress(position, player) {
         const safePosition = Math.max(0, Number.isFinite(position) ? position : 0);
 
-        if (this._progressFill && player?.trackLen > 0) {
+        if (this._progressFill && player.trackLen > 0) {
             const frac = Math.min(1, safePosition / player.trackLen);
-            const width = this._progressOuter?.get_width?.() || 0;
+            const width = this._progressOuter.get_width() || 0;
             if (width > 0) {
                 this._progressFill.width = Math.round(width * frac);
             }
@@ -394,7 +393,7 @@ export class DinamicUi {
     _getPopupPosition() {
         const monitor = Main.layoutManager.primaryMonitor;
         const x = monitor.x + Math.floor((monitor.width - CONFIG.width) / 2);
-        const panelHeight = Main.panel?.height || 0;
+        const panelHeight = Main.panel.height;
         const y = monitor.y + panelHeight + CONFIG.topMargin;
 
         return [x, y];
@@ -758,7 +757,7 @@ export class DinamicUi {
         // The pill previews the other player — never the one the popup
         // shows — so the selector always offers something new. Sorting
         // Playing players first picks a playing app when there is one.
-        const display = sorted.find(p => p.busName !== activePlayer?.busName) || activePlayer;
+        const display = sorted.find(p => p.busName !== activePlayer.busName) || activePlayer;
 
         const icon = new St.Icon({
             icon_name: 'audio-x-generic-symbolic',
@@ -980,7 +979,7 @@ export class DinamicUi {
         });
         for (const player of players) {
             items.add_child(this._createPlayerMenuItem(player,
-                player.busName === activePlayer?.busName, activePlayer));
+                player.busName === activePlayer.busName, activePlayer));
         }
 
         this._playerPill.add_child(items);
@@ -1043,7 +1042,7 @@ export class DinamicUi {
         // Only the controlled player's row dances when it's actually
         // playing — other rows that report Playing stay still, so exactly
         // one animation shows. Otherwise the controlled row gets the check.
-        if (player.status === 'Playing' && player.busName === activePlayer?.busName)
+        if (player.status === 'Playing' && player.busName === activePlayer.busName)
             box.add_child(this._createMenuEq());
         else if (isActive) {
             box.add_child(new St.Icon({

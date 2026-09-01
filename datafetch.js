@@ -59,7 +59,7 @@ export class MprisDataFetcher {
         // playing (Play on a player that can't play just errors harmlessly).
         // Not in _selectActivePlayer: every refresh would re-Play the chosen
         // player and the pause button would never stick.
-        if (busName && this._players[busName]?.status !== 'Playing')
+        if (busName && this._players[busName].status !== 'Playing')
             this._sendControlTo(busName, 'Play');
     }
 
@@ -268,8 +268,8 @@ export class MprisDataFetcher {
     _resolveAppIconName(entry) {
         try {
             const appInfo = Gio.DesktopAppInfo.new(`${entry}.desktop`);
-            const names = appInfo?.get_icon()?.get_names?.();
-            if (names?.length)
+            const names = appInfo.get_icon().get_names();
+            if (names.length)
                 return names[0];
         } catch (_e) {}
 
@@ -280,8 +280,8 @@ export class MprisDataFetcher {
             if (!id.endsWith(`${entry}.desktop`)) continue;
 
             try {
-                const names = appInfo.get_icon()?.get_names?.();
-                if (names?.length)
+                const names = appInfo.get_icon().get_names();
+                if (names.length)
                     return names[0];
             } catch (_e) {}
             break;
