@@ -20,6 +20,7 @@ export default class DinamicMediaPopup extends Extension {
         this._ui = new DinamicUi({
             uuid: this.uuid,
             name: this.metadata.name,
+            settings: this.getSettings(),
             onOpenPopup: () => this._openPopup(),
             onControl: method => this._data?.sendControl(method),
             onSeek: (position, player) => this._data?.seekTo(position, player),

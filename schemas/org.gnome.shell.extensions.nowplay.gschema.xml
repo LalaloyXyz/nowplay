@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.nowplay" path="/org/gnome/shell/extensions/nowplay/">
+    <key name="hover-area-x" type="d">
+      <default>50.0</default>
+      <range min="0.0" max="100.0"/>
+      <summary>Horizontal position of the hover area</summary>
+      <description>Percentage from the left edge to the right edge of the primary display.</description>
+    </key>
+    <key name="hover-area-y" type="d">
+      <default>0.0</default>
+      <range min="0.0" max="100.0"/>
+      <summary>Vertical position of the hover area</summary>
+      <description>Percentage from the top edge to the bottom edge of the primary display.</description>
+    </key>
+    <key name="hover-area-width" type="i">
+      <default>180</default>
+      <range min="10" max="2000"/>
+      <summary>Hover area width in logical pixels</summary>
+    </key>
+    <key name="hover-area-height" type="i">
+      <default>32</default>
+      <range min="2" max="1000"/>
+      <summary>Hover area height in logical pixels</summary>
+    </key>
+    <key name="show-hover-area" type="b">
+      <default>false</default>
+      <summary>Show an outline around the hover area</summary>
+    </key>
+  </schema>
+</schemalist>

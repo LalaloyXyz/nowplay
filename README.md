@@ -4,7 +4,7 @@
 
 # Now Play
 
-### A beautiful media controller for GNOME Shell that brings your music controls right to the clock menu.
+### A beautiful media controller for GNOME Shell that opens from your own hover area.
 
 <br>
 
@@ -34,7 +34,7 @@
 
 **Now Play** is a lightweight and elegant GNOME Shell extension that gives you quick access to media controls directly from the top panel.
 
-Simply hover over or click the clock to open a beautiful popup displaying album artwork, track information, playback progress, and media controls.
+Move the pointer into the invisible hover area to open a popup displaying album artwork, track information, playback progress, and media controls. The area starts at the top center of your primary display and works independently of the clock.
 
 Designed to feel native to GNOME while staying clean, fast.
 
@@ -66,7 +66,8 @@ Designed to feel native to GNOME while staying clean, fast.
 
 ### 🖱 Easy Access
 
-- Hover over the clock to open
+- Hover over a configurable invisible screen area to open
+- Set its position and size in the extension preferences, with an optional placement outline
 - Automatically hides when inactive
 - Stays open while hovered
 - Close instantly with the Escape key
@@ -146,9 +147,11 @@ Restart GNOME Shell or log out and back in.
 ## 🚀 Usage
 
 1. Start playing music.
-2. Hover over the GNOME top-panel clock.
+2. Move the pointer into the hover area (top center of the primary display by default).
 3. The Now Play popup will appear.
 4. Control playback directly from the popup.
+
+Open **Now Play → Settings** in Extensions or Extension Manager to change the area. You can also run `gnome-extensions prefs nowplay@LalaloyXyz`. Position is a percentage of the primary display; width and height are in logical pixels. Enable **Show area outline** while adjusting it. The area lets clicks pass through, and the popup stays inside the display even when the area is near an edge.
 
 The popup provides:
 

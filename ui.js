@@ -134,15 +134,18 @@ function _prettyPlayerName(player) {
 }
 
 export class DinamicUi {
-    constructor({ uuid, name, onOpenPopup, onControl, onSeek, onSelectPlayer }) {
+    constructor({ uuid, name, settings, onOpenPopup, onControl, onSeek, onSelectPlayer }) {
         this._uuid = uuid;
         this._name = name;
         this._onOpenPopup = onOpenPopup;
         this._onControl = onControl;
         this._onSeek = onSeek;
         this._onSelectPlayer = onSelectPlayer;
-        this._clockButton = null;
-        this._clockButtonHandler = null;
+        this._settings = settings;
+        this._settingsChangedId = 0;
+        this._monitorsChangedId = 0;
+        this._hoverPreview = null;
+        this._pointerInHoverArea = false;
         this._stagePointerHandler = null;
         this._popup = null;
         this._popupHandler = null;
@@ -162,6 +165,7 @@ export class DinamicUi {
         this._progressPlayer = null;
         this._seekDrag = null;
         this._progressFill = null;
+        this._progressColor = null;
         this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
@@ -181,68 +185,90 @@ export class DinamicUi {
     }
 
     enable() {
-        this._clockButton = Main.panel.statusArea.dateMenu;
+        this._hoverPreview = new St.Widget({
+            style: 'background-color: rgba(89, 183, 255, 0.18); border: 2px solid rgba(168, 220, 255, 0.9); border-radius: 8px;',
+            reactive: false,
+            opacity: 0,
+        });
+        Main.layoutManager.addChrome(this._hoverPreview, { trackFullscreen: true });
+        this._settingsChangedId = this._settings.connect('changed', () => this._updateHoverArea());
+        this._monitorsChangedId = Main.layoutManager.connect('monitors-changed', () => this._updateHoverArea());
+        this._updateHoverArea();
 
-        if (!this._clockButton) {
-            debugLog('clock button not found');
-            return;
-        }
-
-        this._clockButtonHandler = this._clockButton;
-        this._clockButton.connectObject(
-            'enter-event', () => {
-                this._onOpenPopup();
-                return Clutter.EVENT_PROPAGATE;
-            },
-            'button-press-event', (_actor, event) => {
-                if (event.get_button() !== 1)
-                    return Clutter.EVENT_PROPAGATE;
-
-                this._onOpenPopup();
-                return Clutter.EVENT_STOP;
-            },
-            this._clockButtonHandler,
-        );
-
-        // Pointer events can be consumed by date-menu children before they
-        // reach the button. Listen at the stage so both mouse hover and
-        // finger-down open the popup immediately.
+        // Observe coordinates without an input-catching actor, so clicks
+        // still reach the panel or application underneath the invisible area.
         this._stagePointerHandler = global.stage.connect('captured-event',
             (_actor, event) => {
-                const isTouch = event.type() === Clutter.EventType.TOUCH_BEGIN;
-                const isMotion = event.type() === Clutter.EventType.MOTION;
-                if (!isTouch && !isMotion)
+                const type = event.type();
+                if (type !== Clutter.EventType.MOTION && type !== Clutter.EventType.TOUCH_BEGIN)
+                    return Clutter.EVENT_PROPAGATE;
+
+                const area = this._getHoverArea();
+                if (!area || Main.overview.visible
+                    || global.display.get_monitor_in_fullscreen(area.monitor.index))
                     return Clutter.EVENT_PROPAGATE;
 
                 const [x, y] = event.get_coords();
-                const [buttonX, buttonY] = this._clockButton.get_transformed_position();
-                const insideClock = x >= buttonX
-                    && x <= buttonX + this._clockButton.get_width()
-                    && y >= buttonY
-                    && y <= buttonY + this._clockButton.get_height();
-
-                if (!insideClock)
-                    return Clutter.EVENT_PROPAGATE;
-
-                this._onOpenPopup();
-                return isTouch ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+                const inside = x >= area.x && x < area.x + area.width
+                    && y >= area.y && y < area.y + area.height;
+                if (inside) {
+                    this._clearCloseTimer();
+                    if (!this._pointerInHoverArea || !this._popupVisible)
+                        this._onOpenPopup();
+                } else if (this._pointerInHoverArea && !this._popupPressed && !this._seekDrag
+                    && !this._playerMenuOpen && !this._pointerInsidePopup() && !this._pointerInsidePlayerPill()) {
+                    this._scheduleClose(CONFIG.popupLeaveCloseDelay);
+                }
+                this._pointerInHoverArea = inside;
+                return Clutter.EVENT_PROPAGATE;
             });
     }
 
     disable() {
         this.destroyPopup();
-
-        if (this._clockButton && this._clockButtonHandler) {
-            this._clockButton.disconnectObject(this._clockButtonHandler);
-            this._clockButtonHandler = null;
-        }
-
         if (this._stagePointerHandler) {
             global.stage.disconnect(this._stagePointerHandler);
             this._stagePointerHandler = null;
         }
+        if (this._settingsChangedId) {
+            this._settings.disconnect(this._settingsChangedId);
+            this._settingsChangedId = 0;
+        }
+        if (this._monitorsChangedId) {
+            Main.layoutManager.disconnect(this._monitorsChangedId);
+            this._monitorsChangedId = 0;
+        }
+        if (this._hoverPreview) {
+            Main.layoutManager.removeChrome(this._hoverPreview);
+            this._hoverPreview.destroy();
+            this._hoverPreview = null;
+        }
+        this._settings = null;
+    }
 
-        this._clockButton = null;
+    _getHoverArea() {
+        const monitor = Main.layoutManager.primaryMonitor;
+        if (!monitor) return null;
+        const width = Math.min(monitor.width, this._settings.get_int('hover-area-width'));
+        const height = Math.min(monitor.height, this._settings.get_int('hover-area-height'));
+        return {
+            monitor, width, height,
+            x: monitor.x + Math.round((monitor.width - width) * this._settings.get_double('hover-area-x') / 100),
+            y: monitor.y + Math.round((monitor.height - height) * this._settings.get_double('hover-area-y') / 100),
+        };
+    }
+
+    _updateHoverArea() {
+        const area = this._getHoverArea();
+        this._pointerInHoverArea = false;
+        this._hoverPreview.opacity = area && this._settings.get_boolean('show-hover-area') ? 255 : 0;
+        if (!area) return;
+        this._hoverPreview.set_position(area.x, area.y);
+        this._hoverPreview.set_size(area.width, area.height);
+        if (this._popupVisible) {
+            this._popup.set_position(...this._getPopupPosition());
+            this._placePlayerPill();
+        }
     }
 
     updateIndicator(player) {
@@ -260,7 +286,7 @@ export class DinamicUi {
     }
 
     showPopup(player, players) {
-        if (!player || this._popupVisible) return;
+        if (!player || this._popupVisible || !this._getHoverArea()) return;
         if (this._popup)
             this._removePopup();
 
@@ -304,7 +330,7 @@ export class DinamicUi {
                         this._finishSeek(type !== Clutter.EventType.TOUCH_CANCEL);
                         return Clutter.EVENT_STOP;
                     }
-                    this._animatePopupPress(false);
+                    this._animatePopupPress(false, event);
                 } else if (type === Clutter.EventType.MOTION
                     || type === Clutter.EventType.TOUCH_UPDATE) {
                     if (this._seekDrag) {
@@ -326,8 +352,12 @@ export class DinamicUi {
                 this._clearCloseTimer();
                 return Clutter.EVENT_PROPAGATE;
             },
-            'leave-event', () => {
-                if (!this._popupPressed && !this._seekDrag && !this._playerMenuOpen && !this._pointerInsidePlayerPill())
+            'leave-event', (_actor, event) => {
+                if (this._pointerInsidePopup(event))
+                    return Clutter.EVENT_PROPAGATE;
+                if (this._popupPressed)
+                    this._animatePopupPress(false, event);
+                else if (!this._closeTimer && !this._seekDrag && !this._playerMenuOpen && !this._pointerInsidePlayerPill())
                     this._scheduleClose(CONFIG.popupLeaveCloseDelay);
                 return Clutter.EVENT_PROPAGATE;
             },
@@ -395,7 +425,7 @@ export class DinamicUi {
             this._popupDragStart = { x, y, offsetX, offsetY };
         } else {
             this._popupDragStart = null;
-            if (!this._pointerInsidePopup() && !this._playerMenuOpen)
+            if (!this._pointerInsidePopup(event) && !this._playerMenuOpen)
                 this._scheduleClose(CONFIG.animSpringDuration + CONFIG.popupLeaveCloseDelay);
         }
 
@@ -471,6 +501,11 @@ export class DinamicUi {
     _animatePopupDrag(event) {
         if (!this._popupVisible || !this._popupPressed || !this._popupDragStart)
             return;
+
+        if (!this._pointerInsidePopup(event)) {
+            this._animatePopupPress(false, event);
+            return;
+        }
 
         const [x, y] = event.get_coords();
         const start = this._popupDragStart;
@@ -611,6 +646,7 @@ export class DinamicUi {
 
         this._progressOuter = null;
         this._progressFill = null;
+        this._progressColor = null;
         this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
@@ -670,7 +706,9 @@ export class DinamicUi {
             const frac = Math.min(1, safePosition / player.trackLen);
             const width = this._progressOuter.get_width() || 0;
             if (width > 0) {
-                this._progressFill.set_style(`width: ${Math.round(width * frac)}px;`);
+                const tint = this._progressColor
+                    ? `background-gradient-end: rgb(${this._progressColor});` : '';
+                this._progressFill.set_style(`width: ${Math.round(width * frac)}px; ${tint}`);
                 this._progressFill.visible = frac > 0;
                 const thumbWidth = this._progressThumb.get_width() || 10;
                 this._progressThumb.translation_x = Math.max(0, Math.min(
@@ -738,11 +776,16 @@ export class DinamicUi {
     }
 
     _getPopupPosition() {
-        const monitor = Main.layoutManager.primaryMonitor;
-        const x = monitor.x + Math.floor((monitor.width - CONFIG.width) / 2);
-        const panelHeight = Main.panel.height;
-        const y = monitor.y + panelHeight + CONFIG.topMargin;
-
+        const area = this._getHoverArea();
+        const { monitor } = area;
+        const extraHeight = this._playerPill ? (this._playerPill.height || 40) + 10 : 0;
+        const height = CONFIG.height + extraHeight;
+        const x = Math.max(monitor.x, Math.min(monitor.x + Math.max(0, monitor.width - CONFIG.width),
+            area.x + Math.round((area.width - CONFIG.width) / 2)));
+        let y = area.y + area.height + CONFIG.topMargin;
+        if (y + height > monitor.y + monitor.height)
+            y = area.y - height - CONFIG.topMargin;
+        y = Math.max(monitor.y, Math.min(monitor.y + Math.max(0, monitor.height - height), y));
         return [x, y];
     }
 
@@ -911,6 +954,13 @@ export class DinamicUi {
 
                     const color = _getArtworkGlow(pixbuf);
                     if (color) {
+                        this._progressColor = color;
+                        this._progressOuter.get_first_child().set_style(`background-color: rgba(${color}, 0.28);`);
+                        this._progressThumb.set_style(`
+                            background-color: rgb(${color});
+                            box-shadow: 0 0 8px 2px rgba(${color}, 0.80);
+                        `);
+                        this.updateProgress(player.position, player);
                         glow.set_style(`${glow.get_style()}
                             background-gradient-direction: vertical;
                             background-gradient-start: rgba(${color}, 0);
@@ -1622,13 +1672,12 @@ export class DinamicUi {
         }
     }
 
-    _pointerInsidePopup() {
+    _pointerInsidePopup(event = null) {
         if (!this._popup) return true;
 
-        const [x, y] = global.get_pointer();
+        const [x, y] = event ? event.get_coords() : global.get_pointer();
         const [px, py] = this._popup.get_transformed_position();
-        const pw = this._popup.get_width();
-        const ph = this._popup.get_height();
+        const [pw, ph] = this._popup.get_transformed_size();
 
         return x >= px && x <= px + pw && y >= py && y <= py + ph;
     }
