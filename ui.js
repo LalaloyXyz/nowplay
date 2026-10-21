@@ -5,32 +5,44 @@ import Clutter from 'gi://Clutter';
 import Cogl from 'gi://Cogl';
 import GLib from 'gi://GLib';
 import GdkPixbuf from 'gi://GdkPixbuf';
+import Cairo from 'cairo';
 
 import { debugLog } from './debug.js';
+
+// Optional rounded backdrop blur, also used by Blur my Shell. Keep the
+// translucent surface when the library is unavailable on another machine.
+let RoundedBlur = null;
+try {
+    const { default: Blur } = await import('gi://Blur');
+    if (Blur.BlurEffect.list_properties().some(p => p.name === 'corner-radius'))
+        RoundedBlur = Blur;
+} catch (_e) {
+    // The rounded-blur library is not a required extension dependency.
+}
 
 const CONFIG = {
     width: 520,
     height: 176,
     topMargin: 10,
-    animDuration: 480,
-    animCloseDuration: 340,
+    animDuration: 560,
+    animCloseDuration: 300,
+    animSpringDuration: 600,
+    artFlipDuration: 250,
     autoCloseDelay: 3600,
     popupLeaveCloseDelay: 500,
 };
 
 const THEME = {
-    background: 'rgba(5, 5, 7, 0.98)',
-    border: 'rgba(255, 255, 255, 0.11)',
+    border: 'rgba(255, 255, 255, 0.20)',
     highlight: 'rgba(255, 255, 255, 0.16)',
-    progress: '#ffffff',
     accent: '#34d399',
     accentSoft: 'rgba(52, 211, 153, 0.18)',
     text: '#ffffff',
-    mutedText: '#c7c7cc',
-    dimText: '#7d7d86',
+    mutedText: '#e0e3ed',
+    dimText: '#b6bdcc',
     buttonBg: 'rgba(255, 255, 255, 0.075)',
     buttonBorder: 'rgba(255, 255, 255, 0.10)',
-    radius: 35,
+    radius: 48,
 };
 
 // Scales the art to fit `size` and cuts rounded corners directly in the
@@ -76,6 +88,42 @@ function _roundArtPixbuf(pixbuf, size, radius) {
         GdkPixbuf.Colorspace.RGB, true, 8, w, h, stride);
 }
 
+// Sample a small thumbnail and select its strongest color group. Favor
+// colorful pixels so shadows and white lettering do not wash out the glow.
+function _getArtworkGlow(pixbuf) {
+    const sample = pixbuf.scale_simple(24, 24, GdkPixbuf.InterpType.BILINEAR);
+    const pixels = sample.get_pixels();
+    const stride = sample.get_rowstride();
+    const channels = sample.get_n_channels();
+    const groups = new Map();
+
+    for (let y = 0; y < 24; y++) {
+        for (let x = 0; x < 24; x++) {
+            const offset = y * stride + x * channels;
+            const [r, g, b] = pixels.slice(offset, offset + 3);
+            const alpha = channels === 4 ? pixels[offset + 3] / 255 : 1;
+            const peak = Math.max(r, g, b);
+            if (!alpha || peak < 24) continue;
+
+            const weight = alpha * (0.2 + (peak - Math.min(r, g, b)) / peak);
+            const key = ((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5);
+            const group = groups.get(key) || { weight: 0, r: 0, g: 0, b: 0 };
+            group.weight += weight;
+            group.r += r * weight;
+            group.g += g * weight;
+            group.b += b * weight;
+            groups.set(key, group);
+        }
+    }
+
+    const dominant = [...groups.values()].sort((a, b) => b.weight - a.weight)[0];
+    if (!dominant) return null;
+
+    const rgb = [dominant.r, dominant.g, dominant.b].map(c => c / dominant.weight);
+    const gain = Math.max(1, Math.min(2.4, 200 / Math.max(...rgb)));
+    return rgb.map(c => Math.round(Math.min(255, c * gain))).join(', ');
+}
+
 // Player display name for the selector: the resolved icon name (usually the
 // app name, e.g. 'spotify'), else the bus name with the MPRIS prefix stripped.
 function _prettyPlayerName(player) {
@@ -86,26 +134,42 @@ function _prettyPlayerName(player) {
 }
 
 export class DinamicUi {
-    constructor({ uuid, name, onOpenPopup, onControl, onSelectPlayer }) {
+    constructor({ uuid, name, onOpenPopup, onControl, onSeek, onSelectPlayer }) {
         this._uuid = uuid;
         this._name = name;
         this._onOpenPopup = onOpenPopup;
         this._onControl = onControl;
+        this._onSeek = onSeek;
         this._onSelectPlayer = onSelectPlayer;
         this._clockButton = null;
         this._clockButtonHandler = null;
+        this._stagePointerHandler = null;
         this._popup = null;
         this._popupHandler = null;
         this._closeTimer = 0;
         this._popupVisible = false;
+        this._popupPressed = false;
+        this._popupDragStart = null;
+        this._clickWave = null;
+        this._clickWaveLayer = null;
+        this._artFrame = null;
+        this._artFlip = null;
+        this._artTrack = null;
+        this._artContent = null;
+        this._artReady = false;
+        this._artFlipDirection = 1;
         this._progressOuter = null;
+        this._progressPlayer = null;
+        this._seekDrag = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
         this._eqTimers = [];
         this._eqActive = false;
         this._menuEqTimers = [];
         this._playerPill = null;
+        this._playerPillContent = null;
         this._playerMenu = null;
         this._playerMenuOpen = false;
         this._playerGrab = null;
@@ -124,7 +188,8 @@ export class DinamicUi {
             return;
         }
 
-        this._clockButtonHandler = this._clockButton.connectObject(
+        this._clockButtonHandler = this._clockButton;
+        this._clockButton.connectObject(
             'enter-event', () => {
                 this._onOpenPopup();
                 return Clutter.EVENT_PROPAGATE;
@@ -136,14 +201,32 @@ export class DinamicUi {
                 this._onOpenPopup();
                 return Clutter.EVENT_STOP;
             },
-            'touch-event', (_actor, event) => {
-                if (event.type() !== Clutter.EventType.TOUCH_BEGIN)
+            this._clockButtonHandler,
+        );
+
+        // Pointer events can be consumed by date-menu children before they
+        // reach the button. Listen at the stage so both mouse hover and
+        // finger-down open the popup immediately.
+        this._stagePointerHandler = global.stage.connect('captured-event',
+            (_actor, event) => {
+                const isTouch = event.type() === Clutter.EventType.TOUCH_BEGIN;
+                const isMotion = event.type() === Clutter.EventType.MOTION;
+                if (!isTouch && !isMotion)
+                    return Clutter.EVENT_PROPAGATE;
+
+                const [x, y] = event.get_coords();
+                const [buttonX, buttonY] = this._clockButton.get_transformed_position();
+                const insideClock = x >= buttonX
+                    && x <= buttonX + this._clockButton.get_width()
+                    && y >= buttonY
+                    && y <= buttonY + this._clockButton.get_height();
+
+                if (!insideClock)
                     return Clutter.EVENT_PROPAGATE;
 
                 this._onOpenPopup();
-                return Clutter.EVENT_STOP;
-            }
-        );
+                return isTouch ? Clutter.EVENT_STOP : Clutter.EVENT_PROPAGATE;
+            });
     }
 
     disable() {
@@ -152,6 +235,11 @@ export class DinamicUi {
         if (this._clockButton && this._clockButtonHandler) {
             this._clockButton.disconnectObject(this._clockButtonHandler);
             this._clockButtonHandler = null;
+        }
+
+        if (this._stagePointerHandler) {
+            global.stage.disconnect(this._stagePointerHandler);
+            this._stagePointerHandler = null;
         }
 
         this._clockButton = null;
@@ -172,10 +260,12 @@ export class DinamicUi {
     }
 
     showPopup(player, players) {
-        if (!player || this._popup) return;
+        if (!player || this._popupVisible) return;
+        if (this._popup)
+            this._removePopup();
 
-        this._popup = new St.BoxLayout({
-            vertical: false,
+        this._popup = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
             style_class: 'dinamic-popup dinamic-popup-custom',
             style: this._getPopupStyle(),
             reactive: true,
@@ -183,10 +273,48 @@ export class DinamicUi {
             track_hover: true,
         });
 
-        this.buildPopupContent(player, players);
         Main.layoutManager.addChrome(this._popup, { trackFullscreen: true });
+        this.buildPopupContent(player, players);
 
-        this._popupHandler = this._popup.connectObject(
+        this._popupHandler = this._popup;
+        this._popup.connectObject(
+            'captured-event', (_actor, event) => {
+                const type = event.type();
+                if ((type === Clutter.EventType.BUTTON_PRESS && event.get_button() === 1)
+                    || type === Clutter.EventType.TOUCH_BEGIN) {
+                    const [x, y] = event.get_coords();
+                    const [barX, barY] = this._progressOuter.get_transformed_position();
+                    const [barWidth, barHeight] = this._progressOuter.get_transformed_size();
+                    if (this._progressOuter.reactive && x >= barX && x <= barX + barWidth
+                        && y >= barY && y <= barY + barHeight) {
+                        this._seekDrag = { player: { ...this._progressPlayer }, position: 0 };
+                        this._clearCloseTimer();
+                        this._updateSeek(event);
+                        this._startClickWave(event);
+                        return Clutter.EVENT_STOP;
+                    }
+                    this._animatePopupPress(true, event);
+                    this._startClickWave(event);
+                } else if ((type === Clutter.EventType.BUTTON_RELEASE && event.get_button() === 1)
+                    || type === Clutter.EventType.TOUCH_END
+                    || type === Clutter.EventType.TOUCH_CANCEL) {
+                    if (this._seekDrag) {
+                        if (type !== Clutter.EventType.TOUCH_CANCEL)
+                            this._updateSeek(event);
+                        this._finishSeek(type !== Clutter.EventType.TOUCH_CANCEL);
+                        return Clutter.EVENT_STOP;
+                    }
+                    this._animatePopupPress(false);
+                } else if (type === Clutter.EventType.MOTION
+                    || type === Clutter.EventType.TOUCH_UPDATE) {
+                    if (this._seekDrag) {
+                        this._updateSeek(event);
+                        return Clutter.EVENT_STOP;
+                    }
+                    this._animatePopupDrag(event);
+                }
+                return Clutter.EVENT_PROPAGATE;
+            },
             'key-press-event', (_actor, event) => {
                 if (event.get_key_symbol() === Clutter.KEY_Escape) {
                     this.destroyPopup();
@@ -199,10 +327,11 @@ export class DinamicUi {
                 return Clutter.EVENT_PROPAGATE;
             },
             'leave-event', () => {
-                if (!this._playerMenuOpen && !this._pointerInsidePlayerPill())
+                if (!this._popupPressed && !this._seekDrag && !this._playerMenuOpen && !this._pointerInsidePlayerPill())
                     this._scheduleClose(CONFIG.popupLeaveCloseDelay);
                 return Clutter.EVENT_PROPAGATE;
-            }
+            },
+            this._popupHandler,
         );
         this._popup.grab_key_focus();
 
@@ -210,8 +339,18 @@ export class DinamicUi {
         if (CONFIG.animDuration > 0) {
             this._popup.opacity = 0;
             this._popup.set_pivot_point(0.5, 0.5);
-            this._popup.set_scale(0.32, 0.52);
+            this._popup.set_scale(0.18, 0.16);
+            this._popup.translation_y = -CONFIG.height * (1 - 0.16) / 2 - 4;
             this._popup.set_position(x, y);
+
+            const content = this._popup.get_last_child();
+            content.opacity = 0;
+            content.ease({
+                opacity: 255,
+                duration: 180,
+                delay: 90,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            });
 
             this._popup.ease({
                 opacity: 255,
@@ -222,6 +361,7 @@ export class DinamicUi {
             this._popup.ease({
                 scale_x: 1,
                 scale_y: 1,
+                translation_y: 0,
                 duration: CONFIG.animDuration,
                 mode: Clutter.AnimationMode.EASE_OUT_BACK,
             });
@@ -238,9 +378,135 @@ export class DinamicUi {
         this._scheduleClose(CONFIG.autoCloseDelay);
     }
 
+    _animatePopupPress(pressed, event = null) {
+        if (!this._popup || !this._popupVisible || this._popupPressed === pressed)
+            return;
+
+        this._popupPressed = pressed;
+        let offsetX = 0;
+        let offsetY = 0;
+        if (pressed) {
+            this._clearCloseTimer();
+            const [x, y] = event.get_coords();
+            const [px, py] = this._popup.get_transformed_position();
+            const [width, height] = this._popup.get_transformed_size();
+            offsetX = Math.max(-0.5, Math.min(0.5, (x - px) / Math.max(1, width) - 0.5)) * 5;
+            offsetY = Math.max(-0.5, Math.min(0.5, (y - py) / Math.max(1, height) - 0.5)) * 4;
+            this._popupDragStart = { x, y, offsetX, offsetY };
+        } else {
+            this._popupDragStart = null;
+            if (!this._pointerInsidePopup() && !this._playerMenuOpen)
+                this._scheduleClose(CONFIG.animSpringDuration + CONFIG.popupLeaveCloseDelay);
+        }
+
+        this._popup.ease({
+            scale_x: pressed ? 0.985 : 1,
+            scale_y: pressed ? 0.97 : 1,
+            translation_x: offsetX,
+            translation_y: offsetY,
+            duration: pressed ? 110 : CONFIG.animSpringDuration,
+            mode: pressed ? Clutter.AnimationMode.EASE_OUT_QUAD : Clutter.AnimationMode.EASE_OUT_ELASTIC,
+        });
+    }
+
+    _startClickWave(event) {
+        if (!this._popupVisible || !this._clickWaveLayer || !St.Settings.get().enable_animations)
+            return;
+
+        this._clickWave?.timeline.stop();
+        const [x, y] = event.get_coords();
+        const [px, py] = this._popup.get_transformed_position();
+        const [width, height] = this._popup.get_transformed_size();
+        const timeline = new Clutter.Timeline({ actor: this._popup, duration: 560 });
+        const wave = {
+            x: (x - px) / Math.max(1, width) * this._popup.width,
+            y: (y - py) / Math.max(1, height) * this._popup.height,
+            progress: 0,
+            timeline,
+        };
+        this._clickWave = wave;
+        timeline.connect('new-frame', () => {
+            wave.progress = timeline.get_progress();
+            this._clickWaveLayer?.queue_repaint();
+        });
+        timeline.connect('completed', () => {
+            if (this._clickWave !== wave) return;
+            this._clickWave = null;
+            this._clickWaveLayer?.queue_repaint();
+        });
+        timeline.start();
+    }
+
+    _drawClickWave(area) {
+        const cr = area.get_context();
+        cr.setOperator(Cairo.Operator.CLEAR);
+        cr.paint();
+        cr.setOperator(Cairo.Operator.OVER);
+        const wave = this._clickWave;
+        if (wave) {
+            const [width, height] = area.get_surface_size();
+            const radius = Math.min(THEME.radius * St.ThemeContext.get_for_stage(global.stage).scale_factor,
+                width / 2, height / 2);
+            cr.arc(width - radius, radius, radius, -Math.PI / 2, 0);
+            cr.arc(width - radius, height - radius, radius, 0, Math.PI / 2);
+            cr.arc(radius, height - radius, radius, Math.PI / 2, Math.PI);
+            cr.arc(radius, radius, radius, Math.PI, Math.PI * 1.5);
+            cr.closePath();
+            cr.clip();
+
+            const extent = Math.hypot(Math.max(wave.x, width - wave.x), Math.max(wave.y, height - wave.y));
+            const spread = 8 + extent * (1 - (1 - wave.progress) ** 2);
+            const fade = (1 - wave.progress) ** 2;
+            const gradient = new Cairo.RadialGradient(wave.x, wave.y, 0, wave.x, wave.y, spread);
+            gradient.addColorStopRGBA(0, 1, 1, 1, 0.06 * fade);
+            gradient.addColorStopRGBA(0.55, 1, 1, 1, 0.02 * fade);
+            gradient.addColorStopRGBA(0.82, 1, 1, 1, 0.18 * fade);
+            gradient.addColorStopRGBA(1, 1, 1, 1, 0);
+            cr.setSource(gradient);
+            cr.paint();
+        }
+        cr.$dispose();
+    }
+
+    _animatePopupDrag(event) {
+        if (!this._popupVisible || !this._popupPressed || !this._popupDragStart)
+            return;
+
+        const [x, y] = event.get_coords();
+        const start = this._popupDragStart;
+        const pullX = Math.tanh((x - start.x) / 90);
+        const pullY = Math.tanh((y - start.y) / 80);
+        if (!start.dragging) {
+            // Take over the visible pose, including an unfinished press or
+            // spring return, rather than snapping to the pressed pose.
+            start.offsetX = this._popup.translation_x;
+            start.offsetY = this._popup.translation_y;
+            start.scaleX = this._popup.scale_x;
+            start.scaleY = this._popup.scale_y;
+            for (const property of ['translation-x', 'translation-y', 'scale-x', 'scale-y'])
+                this._popup.remove_transition(property);
+            start.dragging = true;
+        }
+
+        // Follow input directly; restarting an ease on every motion makes
+        // the card lag behind the pointer. Animate only the release.
+        this._popup.set({
+            translation_x: Math.max(-22, Math.min(22, start.offsetX + pullX * 18)),
+            translation_y: Math.max(-18, Math.min(18, start.offsetY + pullY * 14)),
+            scale_x: Math.max(0.96, Math.min(1.025, start.scaleX + Math.abs(pullX) * 0.025 - Math.abs(pullY) * 0.010)),
+            scale_y: Math.max(0.94, Math.min(1.015, start.scaleY + Math.abs(pullY) * 0.035 - Math.abs(pullX) * 0.008)),
+        });
+    }
+
     destroyPopup() {
         if (!this._popup) return;
 
+        this._seekDrag = null;
+        this._popupPressed = false;
+        this._popupDragStart = null;
+        this._clickWave?.timeline.stop();
+        this._clickWave = null;
+        this._clickWaveLayer?.queue_repaint();
         this._destroyPlayerMenu();
         this._destroyPlayerPill(true);
         this._clearCloseTimer();
@@ -252,16 +518,23 @@ export class DinamicUi {
         }
 
         if (CONFIG.animCloseDuration > 0) {
+            this._popup.get_last_child().ease({
+                opacity: 0,
+                duration: 100,
+                mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            });
             this._popup.ease({
-                scale_x: 0.38,
-                scale_y: 0.48,
+                scale_x: 0.18,
+                scale_y: 0.16,
+                translation_x: 0,
+                translation_y: -CONFIG.height * (1 - 0.16) / 2 - 4,
                 duration: CONFIG.animCloseDuration,
-                mode: Clutter.AnimationMode.EASE_IN_BACK,
+                mode: Clutter.AnimationMode.EASE_IN_CUBIC,
             });
             this._popup.ease({
                 opacity: 0,
-                duration: Math.round(CONFIG.animCloseDuration * 0.6),
-                delay: Math.round(CONFIG.animCloseDuration * 0.4),
+                duration: Math.round(CONFIG.animCloseDuration * 0.3),
+                delay: Math.round(CONFIG.animCloseDuration * 0.7),
                 mode: Clutter.AnimationMode.EASE_IN_QUAD,
                 onComplete: () => this._removePopup(),
             });
@@ -301,29 +574,65 @@ export class DinamicUi {
             return;
         }
 
+        if (this._seekDrag) {
+            const target = this._seekDrag.player;
+            if (player.busName === target.busName && player.trackId === target.trackId && player.canSeek)
+                return;
+            this._finishSeek(false);
+        }
+
+        const track = {
+            busName: player.busName,
+            key: player.trackId || `${player.title}\n${player.artist}`,
+        };
+        if (this._artTrack?.busName === track.busName && this._artTrack.key !== track.key) {
+            this._artFlip = {
+                content: this._artFlip && this._artFlip.phase !== 'in'
+                    ? this._artFlip.content : this._artContent,
+                direction: this._artFlipDirection,
+                phase: 'out',
+                startedAt: GLib.get_monotonic_time(),
+                actor: null,
+                overlay: null,
+            };
+            this._artFlipDirection = 1;
+        } else if (this._artTrack?.busName !== track.busName) {
+            this._artFlip = null;
+            this._artFlipDirection = 1;
+        }
+        this._artTrack = track;
+
         this._destroyPlayerMenu();
         this._destroyPlayerPill();
+        this._clearEqAnimation();
 
         for (const child of this._popup.get_children().slice())
             child.destroy();
 
         this._progressOuter = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
         this._popup.style = this._getPopupStyle();
+        const glass = this._addGlassBackground(this._popup, THEME.radius);
+        this._clickWaveLayer = new St.DrawingArea({ x_expand: true, y_expand: true });
+        this._clickWaveLayer.connect('repaint', area => this._drawClickWave(area));
+        this._popup.add_child(this._clickWaveLayer);
 
         const mainBox = new St.BoxLayout({
-            vertical: false,
-            style: 'padding: 16px 20px; spacing: 18px;',
+            orientation: Clutter.Orientation.HORIZONTAL,
+            style: 'padding: 20px; spacing: 20px;',
             x_expand: true,
             y_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._popup.add_child(mainBox);
 
-        mainBox.add_child(this._createArtFrame(player));
+        mainBox.add_child(this._createArtFrame(player, glass));
         mainBox.add_child(this._createDetails(player));
+        this._animateArtworkFlip();
+        this.updateProgress(player.position, player);
 
         if (players.length > 1)
             this._createPlayerPill(players, player);
@@ -353,13 +662,19 @@ export class DinamicUi {
     }
 
     updateProgress(position, player) {
+        if (this._seekDrag)
+            position = this._seekDrag.position;
         const safePosition = Math.max(0, Number.isFinite(position) ? position : 0);
 
         if (this._progressFill && player.trackLen > 0) {
             const frac = Math.min(1, safePosition / player.trackLen);
             const width = this._progressOuter.get_width() || 0;
             if (width > 0) {
-                this._progressFill.width = Math.round(width * frac);
+                this._progressFill.set_style(`width: ${Math.round(width * frac)}px;`);
+                this._progressFill.visible = frac > 0;
+                const thumbWidth = this._progressThumb.get_width() || 10;
+                this._progressThumb.translation_x = Math.max(0, Math.min(
+                    width - thumbWidth, width * frac - thumbWidth / 2));
             }
         }
 
@@ -376,16 +691,48 @@ export class DinamicUi {
         }
     }
 
+    _updateSeek(event) {
+        const [x] = event.get_coords();
+        const [left] = this._progressOuter.get_transformed_position();
+        const [width] = this._progressOuter.get_transformed_size();
+        const { player } = this._seekDrag;
+        const fraction = Math.max(0, Math.min(1, (x - left) / Math.max(1, width)));
+        this._seekDrag.position = Math.min(player.trackLen - 1, Math.round(fraction * player.trackLen));
+        this.updateProgress(this._seekDrag.position, player);
+    }
+
+    async _finishSeek(commit) {
+        const seek = this._seekDrag;
+        this._seekDrag = null;
+        if (!this._pointerInsidePopup() && !this._playerMenuOpen)
+            this._scheduleClose(CONFIG.popupLeaveCloseDelay);
+
+        const success = commit && await this._onSeek?.(seek.position, seek.player);
+        const player = this._progressPlayer;
+        if (this._popupVisible && player?.busName === seek.player.busName
+            && player.trackId === seek.player.trackId)
+            this.updateProgress(success ? seek.position : player.position, player);
+    }
+
     _removePopup() {
         if (!this._popup) return;
 
         this._clearEqAnimation();
 
         Main.layoutManager.removeChrome(this._popup);
+        this._artFrame = null;
+        this._artFlip = null;
+        this._artTrack = null;
+        this._artContent = null;
+        this._artReady = false;
+        this._artFlipDirection = 1;
+        this._clickWaveLayer = null;
         this._popup.destroy();
         this._popup = null;
         this._progressOuter = null;
+        this._progressPlayer = null;
         this._progressFill = null;
+        this._progressThumb = null;
         this._currentTimeLabel = null;
         this._playPauseIcon = null;
     }
@@ -401,21 +748,21 @@ export class DinamicUi {
 
     _createDetails(player) {
         const rightBox = new St.BoxLayout({
-            vertical: true,
-            style: 'spacing: 7px; min-width: 80px;',
+            orientation: Clutter.Orientation.VERTICAL,
+            style: 'spacing: 3px; min-width: 80px;',
             x_expand: true,
             y_expand: true,
         });
 
         const headerRow = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             style: 'spacing: 10px;',
             x_expand: true,
         });
 
         const titleLabel = new St.Label({
             text: player.title || 'Unknown',
-            style: `font-weight: 700; font-size: 16px; color: ${THEME.text};`,
+            style: `font-weight: 600; font-size: 18px; color: ${THEME.text}; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);`,
             x_expand: true,
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -426,34 +773,45 @@ export class DinamicUi {
 
         const artistLabel = new St.Label({
             text: player.artist || 'Unknown Artist',
-            style: `font-size: 12px; color: ${THEME.mutedText};`,
+            style: 'font-size: 14px; color: #c6d7ed;',
         });
         artistLabel.clutter_text.set_ellipsize(3);
         rightBox.add_child(artistLabel);
 
-        // Passive progress bar — display only, no seek interaction
-        const progOuter = new St.BoxLayout({
-            style: 'background-color: rgba(255,255,255,0.13); height: 6px; border-radius: 99px; margin-top: 8px;',
+        this._progressPlayer = player;
+        const progOuter = new St.Widget({
+            layout_manager: new Clutter.FixedLayout(),
+            style: 'height: 12px; margin-top: 6px;',
             x_expand: true,
-            reactive: false,
+            reactive: Boolean(player.canSeek && player.trackId && player.trackLen > 0),
         });
         this._progressOuter = progOuter;
-        this._progressFill = new St.BoxLayout({
-            style: `background-color: ${THEME.progress}; border-radius: 99px;`,
-            width: 0,
+        const track = new St.Widget({
+            style_class: 'dinamic-progress-track',
+            y: 4,
+        });
+        track.add_constraint(new Clutter.BindConstraint({
+            source: progOuter,
+            coordinate: Clutter.BindCoordinate.WIDTH,
+        }));
+        progOuter.add_child(track);
+        this._progressFill = new St.Widget({
+            style_class: 'dinamic-progress-fill',
+            style: 'width: 0px;',
+            y: 4,
         });
         progOuter.add_child(this._progressFill);
+        this._progressThumb = new St.Widget({
+            style_class: 'dinamic-progress-thumb',
+            y: 1,
+        });
+        progOuter.add_child(this._progressThumb);
 
-        // Content is built before the popup is added to the layout, so the
-        // track has no width yet and the fill can't be sized here. Apply
-        // the real position once the track gets its first allocation
-        // instead of waiting for the next position poll tick.
-        const fill = this._progressFill;
+        // Apply the initial position once the track has an allocated width.
         const sizeId = progOuter.connect('notify::width', () => {
             const width = progOuter.get_width();
             if (width <= 0) return;
-            const frac = Math.min(1, (player.position || 0) / (player.trackLen || 1));
-            fill.width = Math.round(width * frac);
+            this.updateProgress(player.position, player);
             progOuter.disconnect(sizeId);
         });
 
@@ -465,12 +823,12 @@ export class DinamicUi {
         });
         this._currentTimeLabel = new St.Label({
             text: this._formatTime(player.position),
-            style: `font-size: 10px; font-weight: 600; color: ${THEME.dimText};`,
+            style: 'font-size: 11px; color: #d0e0f5;',
             x_align: Clutter.ActorAlign.START,
         });
         const totalTimeLabel = new St.Label({
             text: trackTime,
-            style: `font-size: 10px; font-weight: 600; color: ${THEME.dimText};`,
+            style: 'font-size: 11px; color: #d0e0f5;',
             x_expand: true,
             x_align: Clutter.ActorAlign.END,
         });
@@ -480,11 +838,10 @@ export class DinamicUi {
 
         rightBox.add_child(this._createControls(player));
 
-        this.updateProgress(player.position, player);
         return rightBox;
     }
 
-    _createArtFrame(player) {
+    _createArtFrame(player, { glass, glow }) {
         const artIcon = new St.Icon({
             icon_name: 'audio-x-generic-symbolic',
             style: 'width: 118px; height: 118px;',
@@ -511,6 +868,10 @@ export class DinamicUi {
             y_align: Clutter.ActorAlign.CENTER,
         });
         artFrame.add_child(artIcon);
+        artFrame.set_pivot_point(0.5, 0.5);
+        this._artFrame = artFrame;
+        this._artContent = null;
+        this._artReady = !player.artUrl;
 
         if (player.artUrl) {
             let file = null;
@@ -521,10 +882,13 @@ export class DinamicUi {
             }
 
             if (file) {
+                const cancellable = new Gio.Cancellable();
+                artFrame.connect('destroy', () => cancellable.cancel());
                 // Keep the fallback hidden while loading so it doesn't
                 // flash as "not found"; it only reappears on failure.
                 artIcon.opacity = 0;
-                file.load_contents_async(null, (f, res) => {
+                file.load_contents_async(cancellable, (f, res) => {
+                    if (cancellable.is_cancelled()) return;
                     if (!artIcon.get_parent()) return; // popup closed/rebuilt
 
                     let pixbuf = null;
@@ -540,24 +904,51 @@ export class DinamicUi {
 
                     if (!pixbuf) {
                         artIcon.opacity = 255;
+                        this._artReady = true;
+                        this._animateArtworkFlip();
                         return;
+                    }
+
+                    const color = _getArtworkGlow(pixbuf);
+                    if (color) {
+                        glow.set_style(`${glow.get_style()}
+                            background-gradient-direction: vertical;
+                            background-gradient-start: rgba(${color}, 0);
+                            background-gradient-end: rgba(${color}, 0.14);
+                        `);
+                        glass.set_style(`${glass.get_style()}
+                            border-bottom-color: rgba(${color}, 0.24);
+                        `);
                     }
 
                     // St.Icon lost its pixbuf setter on newer shells, so the
                     // rounded art is shown as raw RGBA in an StImageContent —
                     // the same content type St.TextureCache fills.
                     const rounded = _roundArtPixbuf(pixbuf, 125, 20);
-                    const content = new St.ImageContent();
+                    const content = new St.ImageContent({
+                        preferredWidth: rounded.get_width(),
+                        preferredHeight: rounded.get_height(),
+                    });
                     try {
+                        const coglContext = [];
+                        const mutterBackend = global.stage?.context?.get_backend?.();
+                        if (content.set_bytes.length === 6 && mutterBackend?.get_cogl_context)
+                            coglContext.push(mutterBackend.get_cogl_context());
+
+                        const bytes = rounded.get_data_as_bytes
+                            ? rounded.get_data_as_bytes()
+                            : new GLib.Bytes(rounded.get_pixels());
                         content.set_bytes(
-                            Clutter.get_default_backend().get_cogl_context(),
-                            new GLib.Bytes(rounded.get_pixels()),
+                            ...coglContext,
+                            bytes,
                             Cogl.PixelFormat.RGBA_8888,
                             rounded.get_width(),
                             rounded.get_height(),
                             rounded.get_rowstride());
                     } catch (_e) {
                         artIcon.opacity = 255;
+                        this._artReady = true;
+                        this._animateArtworkFlip();
                         return;
                     }
 
@@ -567,10 +958,15 @@ export class DinamicUi {
                         height: 125,
                     });
                     artImage.set_position(0, 0);
-                    artFrame.add_child(artImage);
+                    artFrame.insert_child_at_index(artImage, 1);
+                    this._artContent = content;
+                    this._artReady = true;
+                    this._animateArtworkFlip();
                     // The fallback stays hidden behind the art — it would
                     // show through the transparent rounded corners.
                 });
+            } else {
+                this._artReady = true;
             }
         }
 
@@ -617,41 +1013,37 @@ export class DinamicUi {
     _createStatusPill(player) {
         const isPlaying = player.status === 'Playing';
 
-        // Equalizer bars
         const barBox = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             style: 'spacing: 2px;',
             y_align: Clutter.ActorAlign.CENTER,
         });
-        const NUM_BARS = 4;
         const bars = [];
-        const barBaseHeights = [4, 0, 6, 2];
-        const barHeights = [1.8, 1.3, 2.2, 1.5];
-        const barSpeeds = [420, 360, 500, 440];
+        const lowScales = [0.25, 0.35, 0.50, 0.30, 0.20];
+        const highScales = [0.65, 0.95, 1.0, 0.85, 0.60];
+        const restingScales = [0.25, 0.45, 0.65, 0.45, 0.25];
+        const barSpeeds = [480, 400, 520, 440, 500];
 
-        for (let i = 0; i < NUM_BARS; i++) {
+        for (let i = 0; i < lowScales.length; i++) {
             const bar = new St.Widget({
-                style: `
-                    width: 3px;
-                    min-height: 6px;
-                    height: ${barBaseHeights[i]}px;
-                    background-color: ${THEME.text};
-                    border-radius: 2px;
-                `,
+                style_class: 'dinamic-status-bar',
+                y_align: Clutter.ActorAlign.CENTER,
+                opacity: i === 0 || i === lowScales.length - 1 ? 200 : 255,
             });
-            bar.set_pivot_point(0.5, 1.0);
+            bar.set_pivot_point(0.5, 0.5);
+            bar.set_scale(1, isPlaying ? lowScales[i] : restingScales[i]);
             bars.push(bar);
             barBox.add_child(bar);
         }
 
-        // Equalizer true up-down loop when playing
+        // Animate around the center without resizing the title row.
         if (isPlaying) {
             this._eqActive = true;
             bars.forEach((bar, i) => {
                 const animateUp = () => {
                     if (!this._eqActive || !bar.get_parent()) return;
                     bar.ease({
-                        scale_y: barHeights[i],
+                        scale_y: highScales[i],
                         duration: barSpeeds[i],
                         mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
                         onComplete: () => animateDown(),
@@ -660,7 +1052,7 @@ export class DinamicUi {
                 const animateDown = () => {
                     if (!this._eqActive || !bar.get_parent()) return;
                     bar.ease({
-                        scale_y: 1.0,
+                        scale_y: lowScales[i],
                         duration: barSpeeds[i],
                         mode: Clutter.AnimationMode.EASE_IN_OUT_SINE,
                         onComplete: () => animateUp(),
@@ -668,7 +1060,8 @@ export class DinamicUi {
                 };
 
                 // Stagger bar starts so they move at different phases
-                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 110, () => {
+                const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 70, () => {
+                    this._eqTimers = this._eqTimers.filter(timer => timer !== id);
                     animateUp();
                     return GLib.SOURCE_REMOVE;
                 });
@@ -676,23 +1069,28 @@ export class DinamicUi {
             });
         }
 
-        return barBox;
+        return new St.Bin({
+            style: 'margin-right: 8px;',
+            child: barBox,
+            y_align: Clutter.ActorAlign.CENTER,
+            accessible_name: isPlaying ? 'Playing' : 'Paused',
+        });
     }
 
     _createControls(player) {
         const controls = new St.BoxLayout({
-            style: 'spacing: 6px; padding-top: 6px;',
+            style: 'spacing: 14px; padding-top: 2px;',
             x_align: Clutter.ActorAlign.CENTER,
         });
 
-        controls.add_child(this._makeButton('media-skip-backward-symbolic', () => this._onControl('Previous')));
+        controls.add_child(this._makeButton('media-skip-backward-symbolic', () => this._skipTrack('Previous')));
 
         this._playPauseIcon = new St.Icon({
             icon_name: player.status === 'Playing'
                 ? 'media-playback-pause-symbolic'
                 : 'media-playback-start-symbolic',
-            style: 'width: 40px; height: 40px;',
-            icon_size: 40,
+            style: 'width: 32px; height: 32px;',
+            icon_size: 32,
         });
         const playPauseButton = new St.Button({
             style_class: 'dinamic-control-button dinamic-primary-button',
@@ -701,6 +1099,7 @@ export class DinamicUi {
             reactive: true,
             can_focus: true,
             track_hover: true,
+            accessible_name: player.status === 'Playing' ? 'Pause' : 'Play',
         });
         playPauseButton.set_pivot_point(0.5, 0.5);
         playPauseButton.connect('button-press-event', () => {
@@ -715,15 +1114,89 @@ export class DinamicUi {
         playPauseButton.connect('clicked', () => this._onControl('PlayPause'));
         controls.add_child(playPauseButton);
 
-        controls.add_child(this._makeButton('media-skip-forward-symbolic', () => this._onControl('Next')));
+        controls.add_child(this._makeButton('media-skip-forward-symbolic', () => this._skipTrack('Next')));
         return controls;
+    }
+
+    _skipTrack(method) {
+        this._artFlipDirection = method === 'Previous' ? -1 : 1;
+        this._onControl(method);
+    }
+
+    _animateArtworkFlip() {
+        const art = this._artFrame;
+        const flip = this._artFlip;
+        if (!art || !flip) return;
+
+        if (flip.actor !== art) {
+            flip.actor = art;
+            if (flip.phase !== 'in') {
+                flip.overlay = flip.content
+                    ? new Clutter.Actor({ content: flip.content, width: 125, height: 125 })
+                    : new St.Icon({ icon_name: 'audio-x-generic-symbolic', icon_size: 118 });
+                art.add_child(flip.overlay);
+            }
+        }
+
+        const isCurrent = () => this._artFrame === art && this._artFlip === flip;
+        art.remove_transition('rotation-angle-y');
+        if (flip.phase === 'out') {
+            const elapsed = (GLib.get_monotonic_time() - flip.startedAt) / 1000;
+            const progress = Math.min(1, elapsed / CONFIG.artFlipDuration);
+            art.rotation_angle_y = flip.direction * 90 * progress ** 2;
+            if (progress < 1) {
+                art.ease({
+                    rotation_angle_y: flip.direction * 90,
+                    duration: CONFIG.artFlipDuration - elapsed,
+                    mode: Clutter.AnimationMode.EASE_IN_QUAD,
+                    onComplete: () => {
+                        if (!isCurrent()) return;
+                        flip.phase = 'waiting';
+                        this._animateArtworkFlip();
+                    },
+                });
+                return;
+            }
+            flip.phase = 'waiting';
+        }
+
+        // Swap faces at the edge, after the new cover has loaded. Never
+        // expose a mirrored back face or reveal an empty loading frame.
+        if (flip.phase === 'waiting') {
+            art.rotation_angle_y = flip.direction * 90;
+            if (!this._artReady) return;
+            flip.overlay?.destroy();
+            flip.overlay = null;
+            flip.phase = 'in';
+            flip.startedAt = GLib.get_monotonic_time();
+        }
+        if (!this._artReady) {
+            art.rotation_angle_y = -flip.direction * 90;
+            flip.startedAt = null;
+            return;
+        }
+
+        flip.startedAt ??= GLib.get_monotonic_time();
+        const elapsed = (GLib.get_monotonic_time() - flip.startedAt) / 1000;
+        const progress = Math.min(1, elapsed / CONFIG.artFlipDuration);
+        art.rotation_angle_y = -flip.direction * 90 * (1 - progress) ** 3;
+        art.ease({
+            rotation_angle_y: 0,
+            duration: Math.max(0, CONFIG.artFlipDuration - elapsed),
+            mode: Clutter.AnimationMode.EASE_OUT_CUBIC,
+            onComplete: () => {
+                if (!isCurrent()) return;
+                art.rotation_angle_y = 0;
+                this._artFlip = null;
+            },
+        });
     }
 
     _makeButton(iconName, callback) {
         const icon = new St.Icon({
             icon_name: iconName,
-            style: 'width: 40px; height: 40px;',
-            icon_size: 40,
+            style: 'width: 28px; height: 28px;',
+            icon_size: 28,
         });
         const button = new St.Button({
             style_class: 'dinamic-control-button dinamic-secondary-button',
@@ -732,6 +1205,7 @@ export class DinamicUi {
             reactive: true,
             can_focus: true,
             track_hover: true,
+            accessible_name: iconName === 'media-skip-backward-symbolic' ? 'Previous track' : 'Next track',
         });
         button.set_pivot_point(0.5, 0.5);
         button.connect('button-press-event', () => {
@@ -776,7 +1250,7 @@ export class DinamicUi {
         label.clutter_text.set_ellipsize(3);
 
         const sepLabel = new St.Label({
-            text: ':',
+            text: '·',
             style: `font-size: 12px; font-weight: 600; color: ${THEME.dimText};`,
         });
 
@@ -795,31 +1269,32 @@ export class DinamicUi {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
-        // A reactive box, not St.Button: like the popup itself, a box
-        // allocates its children inside its own width, so a long song
-        // title can't stretch the pill past CONFIG.width (St.Button
-        // sizes to its child's natural width and grows with it).
-        // Vertical so the dropdown rows can expand inside the card below
-        // the trigger row — a modern select look.
-        const pill = new St.BoxLayout({
-            vertical: true,
+        // Stack the glass surface behind a vertical content box. Keeping
+        // the width constrained lets long titles ellipsize inside the pill.
+        const pill = new St.Widget({
+            layout_manager: new Clutter.BinLayout(),
             style_class: 'dinamic-player-pill',
             style: `
-                background-color: ${THEME.background};
-                border: 1px solid ${THEME.border};
-                border-radius: ${THEME.radius}px;
-                padding: 8px 14px;
+                border-radius: 22px;
                 width: ${CONFIG.width}px;
-                box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.20);
             `,
             reactive: true,
             can_focus: true,
             track_hover: true,
             opacity: 0,
         });
+        this._addGlassBackground(pill, 22);
+        this._playerPillContent = new St.BoxLayout({
+            orientation: Clutter.Orientation.VERTICAL,
+            style: 'padding: 12px 16px;',
+            x_expand: true,
+            y_expand: true,
+        });
+        pill.add_child(this._playerPillContent);
 
         const trigger = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             style: 'spacing: 8px;',
             reactive: true,
             can_focus: true,
@@ -830,7 +1305,7 @@ export class DinamicUi {
         trigger.add_child(sepLabel);
         trigger.add_child(songLabel);
         trigger.add_child(arrow);
-        pill.add_child(trigger);
+        this._playerPillContent.add_child(trigger);
 
         // Only the trigger row opens/toggles the dropdown — the pill
         // itself stays click-free so the player rows own their clicks.
@@ -912,6 +1387,7 @@ export class DinamicUi {
 
         const pill = this._playerPill;
         this._playerPill = null;
+        this._playerPillContent = null;
 
         if (animate && CONFIG.animCloseDuration > 0) {
             pill.ease({
@@ -968,7 +1444,7 @@ export class DinamicUi {
         Main.layoutManager.addChrome(this._playerPill, { trackFullscreen: true });
 
         const items = new St.BoxLayout({
-            vertical: true,
+            orientation: Clutter.Orientation.VERTICAL,
             style: `
                 spacing: 2px;
                 margin-top: 8px;
@@ -982,7 +1458,7 @@ export class DinamicUi {
                 player.busName === activePlayer.busName, activePlayer));
         }
 
-        this._playerPill.add_child(items);
+        this._playerPillContent.add_child(items);
         this._playerMenu = items;
         this._playerMenuOpen = true;
         this._clearCloseTimer();
@@ -1031,7 +1507,7 @@ export class DinamicUi {
         song.clutter_text.set_ellipsize(3);
 
         const box = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             style: 'spacing: 10px;',
             x_expand: true,
         });
@@ -1079,7 +1555,7 @@ export class DinamicUi {
     // startup timeouts are tracked; the ease chain dies with the bars.
     _createMenuEq() {
         const barBox = new St.BoxLayout({
-            vertical: false,
+            orientation: Clutter.Orientation.HORIZONTAL,
             style: 'spacing: 2px;',
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -1120,6 +1596,7 @@ export class DinamicUi {
             };
 
             const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, i * 90, () => {
+                this._menuEqTimers = this._menuEqTimers.filter(timer => timer !== id);
                 animateUp();
                 return GLib.SOURCE_REMOVE;
             });
@@ -1189,27 +1666,76 @@ export class DinamicUi {
 
     _getPopupStyle() {
         return `
-            background-color: ${THEME.background};
-            border: 1px solid ${THEME.border};
             border-radius: ${THEME.radius}px;
-            box-shadow: 0 22px 56px rgba(0, 0, 0, 0.66);
+            box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
             width: ${CONFIG.width}px;
             height: ${CONFIG.height}px;
         `;
     }
 
     _getButtonStyle(primary) {
-        const color = THEME.text;
-        const size = primary ? 28 : 22;
+        const size = primary ? 44 : 36;
 
         return `
             padding: 0;
-            color: ${color};
-            background-color: transparent;
-            border: none;
-            min-width: ${size}px;
-            min-height: ${size}px;
+            color: ${THEME.text};
+            width: ${size}px;
+            height: ${size}px;
         `;
+    }
+
+    _addGlassBackground(actor, radius) {
+        const background = new St.Widget({
+            x_expand: true,
+            y_expand: true,
+        });
+        actor.add_child(background);
+
+        // A separate lower band keeps the artwork tint out of the center.
+        // Both gradient stops use the same hue so only opacity increases.
+        const glow = actor === this._popup ? new St.Widget({
+            style_class: 'dinamic-art-glow',
+            style: `height: 64px; border-radius: 0 0 ${radius}px ${radius}px;`,
+            x_expand: true,
+            y_expand: true,
+            y_align: Clutter.ActorAlign.END,
+        }) : null;
+        if (glow)
+            actor.add_child(glow);
+
+        // Keep the tint above the blur so the dark-to-clear gradient is
+        // composited over the sampled desktop rather than into the effect.
+        const glass = new St.Widget({
+            style_class: 'dinamic-glass-background',
+            style: `
+                border: 1px solid ${THEME.border};
+                border-top-color: rgba(255, 255, 255, 0.36);
+                border-bottom-color: rgba(255, 255, 255, 0.30);
+                border-radius: ${radius}px;
+            `,
+            x_expand: true,
+            y_expand: true,
+        });
+        actor.add_child(glass);
+
+        // Only the backing actor gets the effect, keeping text and controls
+        // sharp. Its effect and signal connection die with the surface.
+        if (RoundedBlur) {
+            const context = St.ThemeContext.get_for_stage(global.stage);
+            const effect = new RoundedBlur.BlurEffect({
+                mode: RoundedBlur.BlurMode.BACKGROUND,
+                brightness: 0.95,
+                radius: 96 * context.scale_factor,
+                corner_radius: radius * context.scale_factor,
+            });
+            background.add_effect(effect);
+            context.connectObject('notify::scale-factor', () => {
+                effect.radius = 96 * context.scale_factor;
+                effect.corner_radius = radius * context.scale_factor;
+            }, background);
+        }
+
+        return { glass, glow };
     }
 
     _formatTime(usec) {

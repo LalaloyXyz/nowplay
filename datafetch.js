@@ -31,6 +31,39 @@ export class MprisDataFetcher {
         this._sendControlTo(this._activePlayer, method);
     }
 
+    seekTo(position, target) {
+        const player = this.activePlayer;
+        if (!player?.canSeek || !target || player.busName !== target.busName
+            || player.trackId !== target.trackId || !Number.isFinite(position)
+            || player.trackLen <= 0 || !GLib.Variant.is_object_path(player.trackId || '')
+            || player.trackId === '/org/mpris/MediaPlayer2/TrackList/NoTrack')
+            return Promise.resolve(false);
+
+        const trackId = player.trackId;
+        const bounded = Math.max(0, Math.min(player.trackLen - 1, Math.round(position)));
+        return new Promise(resolve => {
+            Gio.DBus.session.call(
+                player.busName, '/org/mpris/MediaPlayer2',
+                'org.mpris.MediaPlayer2.Player', 'SetPosition',
+                new GLib.Variant('(ox)', [trackId, bounded]), null,
+                Gio.DBusCallFlags.NONE, -1, null,
+                (connection, result) => {
+                    try {
+                        connection.call_finish(result);
+                        if (this.activePlayer !== player || player.trackId !== trackId) {
+                            resolve(false);
+                            return;
+                        }
+                        this._setPlayerPosition(player, bounded);
+                        resolve(true);
+                    } catch (_e) {
+                        resolve(false);
+                    }
+                }
+            );
+        });
+    }
+
     _sendControlTo(busName, method) {
         Gio.DBus.session.call(
             busName,
@@ -155,6 +188,7 @@ export class MprisDataFetcher {
             artUrl: null,
             trackId: null,
             trackLen: 0,
+            canSeek: false,
             position: 0,
             positionUpdatedAt: 0,
             appIconName: null,
@@ -218,6 +252,8 @@ export class MprisDataFetcher {
                 player.artUrl = this._unpackValue(metadata['mpris:artUrl']) || null;
                 player.trackId = this._unpackValue(metadata['mpris:trackid']) || null;
                 player.trackLen = this._unpackValue(metadata['mpris:length']) || 0;
+                player.canSeek = this._unpackValue(props.CanSeek) === true
+                    && this._unpackValue(props.CanControl) !== false;
                 this._setPlayerPosition(player, this._readPosition(props, player.position));
             }
 
@@ -266,18 +302,13 @@ export class MprisDataFetcher {
     // scanning app-info dirs for a matching ID, then fall back to the last
     // dotted segment.
     _resolveAppIconName(entry) {
-        try {
-            const appInfo = Gio.DesktopAppInfo.new(`${entry}.desktop`);
-            const names = appInfo.get_icon().get_names();
-            if (names.length)
-                return names[0];
-        } catch (_e) {}
-
-        // Flatpak: there's no `zen.desktop`, but app.zen_browser.zen.desktop
-        // exists and carries the icon name that the theme actually has.
+        // Search installed desktop entries directly. This also handles
+        // Flatpak IDs and avoids the DesktopAppInfo.new() path, which throws
+        // on GNOME 51 for some entries.
         for (const appInfo of Gio.AppInfo.get_all()) {
             const id = appInfo.get_id() || '';
-            if (!id.endsWith(`${entry}.desktop`)) continue;
+            if (id !== `${entry}.desktop` && !id.endsWith(`${entry}.desktop`))
+                continue;
 
             try {
                 const names = appInfo.get_icon().get_names();

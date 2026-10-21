@@ -8,7 +8,7 @@
 
 <br>
 
-![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-46%20|%2047%20|%2048%20|%2049%20|%2050-4A86CF)
+![GNOME Shell](https://img.shields.io/badge/GNOME%20Shell-46%20|%2047%20|%2048%20|%2049%20|%2050%20|%2051-4A86CF)
 ![Platform](https://img.shields.io/badge/Platform-Linux-FCC624)
 ![License](https://img.shields.io/badge/License-GPL--3.0-green)
 
@@ -47,6 +47,7 @@ Designed to feel native to GNOME while staying clean, fast.
 - Play / Pause
 - Previous Track
 - Next Track
+- Click or drag the seek bar to change position in players that support seeking
 
 ### 📀 Media Information
 
@@ -55,6 +56,13 @@ Designed to feel native to GNOME while staying clean, fast.
 - Artist name
 - Media player application icon
 - Playback status indicator
+
+### Frosted Background
+
+- Translucent cards with rounded corners and soft borders
+- A soft bottom glow that follows the album artwork's dominant color
+- Rounded backdrop blur when the optional `gnome-rounded-blur` library is installed (also used by Blur my Shell)
+- Without that library, cards retain their translucent tint without blur
 
 ### 🖱 Easy Access
 
@@ -97,6 +105,7 @@ And many more.
 - 48
 - 49
 - 50
+- 51
 
 ### Media Player
 
